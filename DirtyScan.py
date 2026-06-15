@@ -249,15 +249,56 @@ def extract_domain(url):
 def check_install_requirements():
     print_section(" Checking Requirements ")
     required_pkgs = ["requests", "colorama"]
-    
+
+    # Find the correct pip
+    pip_paths = [
+        shutil.which("pip"),
+        shutil.which("pip3"),
+        "/data/data/com.termux/files/usr/bin/pip",
+        "/data/data/com.termux/files/usr/bin/pip3",
+        "/usr/bin/pip",
+        "/usr/bin/pip3"
+    ]
+
+    pip_cmd = None
+    for p in pip_paths:
+        if p and os.path.exists(p):
+            pip_cmd = p
+            break
+
+    if not pip_cmd:
+        # Fallback: try python -m pip
+        pip_cmd = [sys.executable, "-m", "pip"]
+
     for pkg in required_pkgs:
         try:
             __import__(pkg.replace("-", "_"))
             print_good(f"{pkg} already installed")
         except ImportError:
             print_info(f"Installing {pkg}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
-            print_good(f"{pkg} installed successfully")
+            try:
+                if isinstance(pip_cmd, list):
+                    subprocess.check_call(pip_cmd + ["install", pkg, "-q"])
+                else:
+                    subprocess.check_call([pip_cmd, "install", pkg, "-q"])
+                print_good(f"{pkg} installed successfully")
+            except Exception as e:
+                print_warn(f"Could not install {pkg}: {str(e)}")
+                print_info("Please run: pip install " + pkg)
+
+    sqlmap_path = shutil.which("sqlmap")
+    if sqlmap_path:
+        print_good(f"sqlmap found at {sqlmap_path}")
+    else:
+        print_warn("sqlmap not found. SQL injection will use internal methods.")
+
+    nmap_path = shutil.which("nmap")
+    if nmap_path:
+        print_good(f"nmap found at {nmap_path}")
+    else:
+        print_warn("nmap not found. Port scanning will use Python socket methods.")
+
+    print()
     
     # Check if sqlmap is available
     sqlmap_path = shutil.which("sqlmap")
